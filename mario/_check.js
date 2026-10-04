@@ -1,0 +1,2385 @@
+
+"use strict";
+/* ============================================================
+   SUPER MARIO — HTML5 Canvas 复刻版
+   单文件、无依赖，双击即可运行
+   ============================================================ */
+
+/* ---------------- 基础常量 ---------------- */
+var VW = 256, VH = 240, TS = 16, ROWS = 15;      // 视口/瓦片尺寸（像素）
+var cv = document.getElementById("cv");
+var ctx = cv.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+/* 物理参数（单位：像素 / 帧，60fps） */
+var GRAVITY      = 0.42;   // 松开跳跃后的重力
+var GRAVITY_HOLD = 0.165;  // 按住跳跃键且上升时的重力
+var MAX_FALL     = 7.0;
+var MIN_FALL     = -7.0;
+var MAX_WALK     = 1.55;
+var MAX_RUN      = 2.60;
+var ACC_WALK     = 0.09;
+var ACC_RUN      = 0.14;
+var DEC_FRICTION = 0.11;
+var DEC_SKID     = 0.30;
+var JUMP_VEL     = -4.35;
+var JUMP_VEL_RUN = -4.95;
+var ENEMY_SPEED  = 0.55;
+var SHELL_SPEED  = 3.10;
+
+/* ---------------- 调色板 ---------------- */
+var PAL = {
+  "." : null,
+  "K" : "#000000", // 黑
+  "R" : "#d82800", // 马里奥红
+  "r" : "#f83800", // 亮红
+  "S" : "#fcb088", // 肤色
+  "H" : "#6c3400", // 头发/鞋深棕
+  "h" : "#a04000", // 中棕
+  "O" : "#2038ec", // 背带裤蓝
+  "W" : "#fcfcfc", // 白
+  "Y" : "#fcd8a8", // 浅肤色
+  "G" : "#00a800", // 绿
+  "g" : "#58d854", // 亮绿
+  "D" : "#005000", // 深绿
+  "A" : "#f8a800", // 橙
+  "B" : "#b06000", // 栗子怪深棕
+  "b" : "#e8a860", // 栗子怪浅
+  "P" : "#f8b8f8", // 粉
+  "c" : "#f8d800", // 金币黄
+  "C" : "#d8a000", // 深黄
+  "T" : "#8c4a00", // 木/暗橙
+  "w" : "#c0c0c0", // 灰
+  "E" : "#8cb4fc"  // 云底阴影
+};
+/* 火焰马里奥 / 无敌星 换色表 */
+var PAL_FIRE = Object.create(PAL); PAL_FIRE["R"] = "#fcfcfc"; PAL_FIRE["O"] = "#d82800"; PAL_FIRE["r"] = "#ffffff";
+var PAL_STAR1 = Object.create(PAL); PAL_STAR1["R"] = "#f8d800"; PAL_STAR1["O"] = "#e52521"; PAL_STAR1["S"] = "#fcfcfc";
+var PAL_STAR2 = Object.create(PAL); PAL_STAR2["R"] = "#00a800"; PAL_STAR2["O"] = "#f8d800"; PAL_STAR2["S"] = "#fcfcfc";
+var PAL_STAR3 = Object.create(PAL); PAL_STAR3["R"] = "#2038ec"; PAL_STAR3["O"] = "#58d854"; PAL_STAR3["S"] = "#fcfcfc";
+
+/* ---------------- 精灵工具 ---------------- */
+function makeSprite(rows, pal) {
+  pal = pal || PAL;
+  var h = rows.length, w = rows[0].length;
+  var c = document.createElement("canvas"); c.width = w; c.height = h;
+  var g = c.getContext("2d");
+  for (var y = 0; y < h; y++) {
+    var row = rows[y];
+    for (var x = 0; x < w; x++) {
+      var col = pal[row.charAt(x)];
+      if (!col) continue;
+      g.fillStyle = col; g.fillRect(x, y, 1, 1);
+    }
+  }
+  return c;
+}
+/* 生成"右向 + 左向"两个版本，避免每帧翻转 */
+function makePair(rows, pal) {
+  var c = makeSprite(rows, pal);
+  var f = document.createElement("canvas"); f.width = c.width; f.height = c.height;
+  var g = f.getContext("2d");
+  g.translate(c.width, 0); g.scale(-1, 1); g.drawImage(c, 0, 0);
+  return { r: c, l: f };
+}
+function drawSpr(sp, x, y, faceLeft, flipY) {
+  var img = faceLeft ? sp.l : sp.r;
+  x = Math.round(x); y = Math.round(y);
+  if (flipY) {
+    ctx.save(); ctx.translate(x, y + img.height); ctx.scale(1, -1);
+    ctx.drawImage(img, 0, 0); ctx.restore();
+  } else {
+    ctx.drawImage(img, x, y);
+  }
+}
+
+/* ============================================================
+   马里奥精灵：头(8行) + 躯干(固定) + 腿(可变) 组合，节约定义量
+   ============================================================ */
+var SM_HEAD = [
+  "................",
+  ".....RRRRRR.....",
+  "....RRRRRRRRR...",
+  "....HHHSSSSS....",
+  "...HHHSSKSSSS...",
+  "...HHSSSKSSSS...",
+  "...HHHHHHSSS....",
+  ".....SSSSSS....."
+];
+var SM_TORSO = [
+  "..RRRRRRRRR.....",
+  "..RRRRRRRRRR....",
+  "..SSRRRRRRSS....",
+  "..SSOOOOOOSS....",
+  "...OOOOOOOO....."
+];
+var SM_LEGS = {
+  stand: ["...OOOOOOO......", "...HHH..HHH.....", "..HHHH..HHHH...."],
+  walk0: ["...OOOOOOOO.....", "..HHHH...OOO....", ".HHHH.....HHH..."],
+  walk1: ["...OOOOOOO......", "...HHHHHHH......", "..HHHHHHHHH....."],
+  walk2: ["...OOOOOOOO.....", "...OOO...HHHH...", "..HHH.....HHHH.."],
+  jump:  ["..OOO....OOO....", ".HHHH....HHHH...", ".HHHH....HHHH..."],
+  skid:  ["..OOOOOO........", ".HHHH.HHH.......", "HHHH..HHHH......"],
+  dead:  ["...OOOOOOO......", "..HHHH.HHHH.....", ".HHHH....HHHH..."]
+};
+var BG_HEAD = [
+  "................",
+  ".....RRRRRRR....",
+  "....RRRRRRRRR...",
+  "....RRRRRRRRR...",
+  "...HHHSSSSSS....",
+  "..HHHSSSKSSSSS..",
+  "..HHSSSSKSSSSS..",
+  "..HHHHHHSSSSS...",
+  "....SSSSSSSS....",
+  ".....SSSSSS....."
+];
+var BG_TORSO = [
+  "...RRRRRRRRR....",
+  "..RRRRRRRRRRR...",
+  "..RRORRRRRRORR..",
+  "..SRROOOOOORRS..",
+  "..SSOOOAOOOOSS..",
+  "..SSOOOOOOOOSS..",
+  "...RRRRRRRRR....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO.....",
+  "....OOOOOOO....."
+];
+var BG_LEGS = {
+  stand: ["....OOO.OOO.....", "....OOO.OOO.....", "....OOO.OOO.....", "...HHHH.HHHH....", "..HHHHH.HHHHH...", "..HHHHH.HHHHH...", "..HHHHH.HHHHH..."],
+  walk0: ["....OOO.OOO.....", "....OOO.OOO.....", "..OOOO...OOO....", ".HHHHH....OOO...", "HHHHH.....HHHH..", "HHHH......HHHH..", "..........HHHH.."],
+  walk1: ["....OOO.OOO.....", "....OOO.OOO.....", "....OOOOOOO.....", "....OOOOOOO.....", "...HHHHHHHHH....", "..HHHHHHHHHHH...", "..HHHHHHHHHHH..."],
+  walk2: ["....OOO.OOO.....", "....OOO.OOO.....", "....OOO.OOOO....", "....OOO..HHHH...", "....HHH...HHHH..", "...HHHHH..HHHH..", "...HHHHH........"],
+  jump:  ["....OOO.OOO.....", "...OOOO.OOOO....", "..OOOOO.OOOOO...", ".HHHHH...HHHHH..", "HHHHH.....HHHHH.", "HHHH.......HHHH.", "..........HHHH.."],
+  skid:  ["....OOOOOOO.....", "...OOOOOOOOO....", "..HHHHHOOOOO....", ".HHHHH...OOO....", "HHHH.....HHHH...", "........HHHHH...", "........HHHHH..."],
+  dead:  ["....OOOOOOO.....", "...OOOOO.OOO....", "..HHHHH...HHH...", ".HHHHH....HHHH..", "HHHH.......HHH..", "................", "................"]
+};
+function sprSmall(legs, pal) { return makePair(SM_HEAD.concat(SM_TORSO, SM_LEGS[legs]), pal); }
+function sprBig(legs, pal)   { return makePair(BG_HEAD.concat(BG_TORSO, BG_LEGS[legs]), pal); }
+
+var SMALL = {}, BIG = {}, SMALL_F = {}, BIG_F = {}, SMALL_S = [], BIG_S = [];
+var _k, _vi;
+var STAR_PALS = [PAL_STAR1, PAL_STAR2, PAL_STAR3];
+for (_vi = 0; _vi < 3; _vi++) { SMALL_S[_vi] = {}; BIG_S[_vi] = {}; }
+for (_k in SM_LEGS) {
+  SMALL[_k] = sprSmall(_k);
+  BIG[_k]   = sprBig(_k);
+  SMALL_F[_k] = sprSmall(_k, PAL_FIRE);
+  BIG_F[_k]   = sprBig(_k, PAL_FIRE);
+  for (_vi = 0; _vi < 3; _vi++) {
+    SMALL_S[_vi][_k] = sprSmall(_k, STAR_PALS[_vi]);
+    BIG_S[_vi][_k]   = sprBig(_k, STAR_PALS[_vi]);
+  }
+}
+
+/* ---------------- 栗子怪 Goomba ---------------- */
+/* 行 0~1 留空（配合绘制偏移 -2），可见内容落在第 2~15 行，
+   下沿正好压住 14px 碰撞盒的最后一行，脚底与地面严丝合缝 */
+var GOOMBA_A = [
+  "................",
+  "................",
+  "....BBBBBBBB....",
+  "..BBBBBBBBBBBB..",
+  ".BBBBBBBBBBBBBB.",
+  ".BBWWBBBBBBWWBB.",
+  ".BBWKBBBBBBKWBB.",
+  "BBBWKBBBBBBKWBBB",
+  "BBBWWBBBBBBWWBBB",
+  "BBBBBBBBBBBBBBBB",
+  "BBBBBBBBBBBBBBBB",
+  ".bbbbbbbbbbbbbb.",
+  ".bbbbbbbbbbbbbb.",
+  "..bbbbbbbbbbbb..",
+  "..KKKK....KKKK..",
+  ".KKKKKK..KKKKKK."
+];
+var GOOMBA_B = [
+  "................",
+  "................",
+  "....BBBBBBBB....",
+  "..BBBBBBBBBBBB..",
+  ".BBBBBBBBBBBBBB.",
+  ".BBWWBBBBBBWWBB.",
+  ".BBWKBBBBBBKWBB.",
+  "BBBWKBBBBBBKWBBB",
+  "BBBWWBBBBBBWWBBB",
+  "BBBBBBBBBBBBBBBB",
+  "BBBBBBBBBBBBBBBB",
+  ".bbbbbbbbbbbbbb.",
+  ".bbbbbbbbbbbbbb.",
+  "..bbbbbbbbbbbb..",
+  "...KKKK..KKKK...",
+  "..KKKKK..KKKKK.."
+];
+var GOOMBA_FLAT = [
+  "................","................","................","................",
+  "................","................","................","................",
+  "................","................","................","................",
+  "....BBBBBBBB....","..BBBBBBBBBBBB..",".bbbbbbbbbbbbbb.","KKKKKKKKKKKKKKKK"
+];
+var SPR = {};
+SPR.goomba = [makePair(GOOMBA_A), makePair(GOOMBA_B)];
+SPR.goombaFlat = makePair(GOOMBA_FLAT);
+
+/* ---------------- 乌龟 Koopa（绿壳） ----------------
+   统一约定：精灵下沿必须与碰撞盒下沿重合。精灵绘制时 y 偏移 -2，
+   所以首行留空 1 行、总行数 = 碰撞盒高度 + 2：
+     栗子怪 盒高 14 -> 16 行；乌龟 盒高 22 -> 24 行；龟壳 盒高 14 -> 16 行。
+   两个走路帧必须等高，否则动画会上下跳动。 */
+var KOOPA_HEAD = [
+  "................",
+  "......GGGG......",
+  ".....GggggG.....",
+  "....GgWWgggG....",
+  "....GgWKgggG....",
+  "...AGggKgggG....",
+  "...AAGgggggG....",
+  "....GggggggG....",
+  ".....GGGGGG....."
+];
+/* 躯干（龟壳背面）与四肢：轮廓控制在第 2~13 列，
+   这样绘制偏移 -2 后，精灵宽度正好等于 12px 的碰撞盒 */
+var KOOPA_BODY = [
+  ".....DGGGGD.....",
+  "...DGGggggGGD...",
+  "..DGGggggggGGD..",
+  "..DGgGGGGGGgGD..",
+  "..DGgGGGGGGgGD..",
+  "..DGgGGGGGGgGD..",
+  "..DGGggggggGGD..",
+  "...DGGggggGGD...",
+  "....DGggggGD...."
+];
+var KOOPA_FEET_A = [
+  "....GG..GG......",
+  "...GGG..GGG.....",
+  "...AA....AA.....",
+  "..AAA....AAA....",
+  "..AAA....AAA....",
+  "..AAAA..AAAA...."
+];
+var KOOPA_FEET_B = [
+  "....GG..GG......",
+  "...GGG..GGG.....",
+  "...AA....AA.....",
+  "..AAA....AAA....",
+  "..AAA.....AAA...",
+  "..AAAA...AAAA..."
+];
+var KOOPA_WALK_A = KOOPA_HEAD.concat(KOOPA_BODY, KOOPA_FEET_A);
+var KOOPA_WALK_B = KOOPA_HEAD.concat(KOOPA_BODY, KOOPA_FEET_B);
+var KOOPA_SHELL = [
+  "................",
+  "................",
+  ".....GGGGGG.....",
+  "..GGggggggggGG..",
+  ".GGggggggggggGG.",
+  ".GggGGGGGGGGggG.",
+  ".GgGGGGGGGGGGgG.",
+  ".GgGGGGGGGGGGgG.",
+  ".GgGGGGGGGGGGgG.",
+  ".GgGGGGGGGGGGgG.",
+  ".GgGGGGGGGGGGgG.",
+  ".GggGGGGGGGGggG.",
+  ".GGggggggggggGG.",
+  "..GGggggggggGG..",
+  "...GGGGGGGGGG...",
+  "..DDDDDDDDDDDD.."
+];
+SPR.koopa = [makePair(KOOPA_WALK_A), makePair(KOOPA_WALK_B)];
+SPR.shell = [makePair(KOOPA_SHELL)];
+/* 红壳乌龟（速度更快，用于后期关卡） */
+var PAL_REDK = Object.create(PAL); PAL_REDK["G"] = "#d82800"; PAL_REDK["g"] = "#f87858"; PAL_REDK["D"] = "#7a0f0c";
+SPR.koopaR = [makePair(KOOPA_WALK_A, PAL_REDK), makePair(KOOPA_WALK_B, PAL_REDK)];
+SPR.shellR = [makePair(KOOPA_SHELL, PAL_REDK)];
+
+/* ---------------- 食人花 Piranha ---------------- */
+var PIR_HEAD_A = [
+  "....RRRRRRRR....","...RRRRRRRRRR...","..RRWWWWWWWWRR..","..RWWWWWWWWWWR..",
+  "..RRWWWWWWWWRR..","...RRRRRRRRRR...","....RRRRRRRR....","....RRRRRRRR...."
+];
+var PIR_STEM = [
+  ".....GGGGGG.....","....GggggggG....","....GggGGggG....",".....GGGGGG.....",
+  ".....gggggg.....",".....GGGGGG.....",".....gggggg.....",".....GGGGGG....."
+];
+var PIR_HEAD_B = [
+  "................","....RRRRRRRR....","...RRRRRRRRRR...","..RRRRRRRRRRRR..",
+  "..RRWWWWWWWWRR..","...RRRRRRRRRR...","....RRRRRRRR....","....RRRRRRRR...."
+];
+SPR.piranha = [makePair(PIR_HEAD_B.concat(PIR_STEM, PIR_STEM)), makePair(PIR_HEAD_A.concat(PIR_STEM, PIR_STEM))];
+
+/* ---------------- 道具 ---------------- */
+var MUSHROOM = [
+  "................",".....RRRRRR.....","...RRWWWWWWRR...","..RWWWWWWWWWWR..",
+  ".RWWWRRRRRRWWWR.",".RWWRRRRRRRRWWR.","RWWRRRRRRRRRRWWR","RWRRRRRRRRRRRRWR",
+  "RRRRRRRRRRRRRRRR",".RRRRRRRRRRRRRR.","..SSSSSSSSSSSS..","..SSKSSSSSSKSS..",
+  "..SSKSSSSSSKSS..","..SSSSSSSSSSSS..","...SSSSSSSSSS...","................"
+];
+var FLOWER = [
+  "................","................","....RRRRRRRR....","...RWWWWWWWWR...",
+  "..RWWRRRRRRWWR..","..RWWRRRRRRWWR..","...RWWWWWWWWR...","....RRRGGGGR....",
+  "......GggG......","....GGGGGGGG....","...GGggggggGG...","..GGGGGGGGGGGG..",
+  "....GGGGGGGG....",".....gggggg.....",".....GGGGGG.....",".....GGGGGG....."
+];
+var STAR = [
+  "................",".......cc.......","......cKKc......","......cKKc......",
+  ".....cccccc.....",".....cKKKKc.....","..cccccccccccc..","..cKKccKKccKKc..",
+  "...cccKKKKccc...","....ccKKKKcc....","....cKKKKKKc....","...ccKKKKKKcc...",
+  "..ccKKc..cKKcc..",".ccKK......KKcc.",".cKK........KKc.","..c..........c.."
+];
+var COIN_A = [
+  "................",
+  ".....CCCCCC.....",
+  "...CCccccccCC...",
+  "..CccccccccccC..",
+  "..CcccCCCCcccC..",
+  ".CcccCCCCCCcccC.",
+  ".CccCCCCCCCCccC.",
+  ".CccCCCCCCCCccC.",
+  ".CccCCCCCCCCccC.",
+  ".CccCCCCCCCCccC.",
+  ".CcccCCCCCCcccC.",
+  "..CcccCCCCcccC..",
+  "..CccccccccccC..",
+  "...CCccccccCC...",
+  ".....CCCCCC.....",
+  "................"
+];
+var COIN_B = [
+  "................",
+  "......CCCC......",
+  ".....CccccC.....",
+  "....CcccccC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CccCCcC.....",
+  "....CcccccC.....",
+  ".....CccccC.....",
+  "......CCCC......",
+  "................"
+];
+var COIN_C = [
+  "................",
+  "................",
+  ".......CC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......cC.......",
+  ".......CC.......",
+  "................",
+  "................"
+];
+SPR.mushroom = makePair(MUSHROOM);
+var PAL_1UP = Object.create(PAL); PAL_1UP["R"] = "#00a800"; PAL_1UP["r"] = "#58d854";
+SPR.mushroom1up = makePair(MUSHROOM, PAL_1UP);
+SPR.flower   = makePair(FLOWER);
+SPR.star     = makePair(STAR);
+SPR.coin = [makePair(COIN_A), makePair(COIN_B), makePair(COIN_C), makePair(COIN_B)];
+SPR.coinFlat = makePair(COIN_C);
+
+/* ---------------- 火球 / 碎块 / 火棒 ---------------- */
+var FIREBALL_A = [
+  "..AARR..",".ARWWRA.","ARWWWWRA","ARWWWWRA","ARWWWWRA","ARWWWWRA",".ARWWRA.","..AARR.."
+];
+var FIREBALL_B = [
+  "..RRAA..",".RWWARA.","RWWWWARA","RWWWWARA","RWWWWARA","RWWWWARA",".ARWWRA.","..AARR.."
+];
+var FIREBALL_C = ["..AARR..",".ARWWRA.","AWWRRRWA","AWRRRRWA","AWRRRRWA","AWWRRRWA",".ARWWRA.","..AARR.."];
+SPR.fireball = [makeSprite(FIREBALL_A), makeSprite(FIREBALL_B), makeSprite(FIREBALL_C)];
+var BRICKDEB = [
+  "..TT....TT..","..TTTT..TTTT","..TTTT..TTTT","..TT....TT.."
+];
+SPR.deb = [makeSprite(BRICKDEB), makeSprite(BRICKDEB, (function(){ var p = Object.create(PAL); p["T"]="#a03800"; return p; })())];
+var PFIRE = [
+  "..AA..","AAAAAA","AAAAAA","..AA.."
+];
+SPR.podoboo = makeSprite(PFIRE);
+
+/* ---------------- 输入 ---------------- */
+var KEY = { left: 0, right: 0, up: 0, down: 0, jump: 0, run: 0, jumpEdge: 0, start: 0, startEdge: 0 };
+var keyMap = {
+  ArrowLeft: "left", KeyA: "left",
+  ArrowRight: "right", KeyD: "right",
+  ArrowUp: "up", KeyW: "up",
+  ArrowDown: "down", KeyS: "down",
+  Space: "jump", KeyZ: "jump", KeyK: "jump",
+  KeyX: "run", KeyJ: "run", ShiftLeft: "run", ShiftRight: "run"
+};
+function setKey(code, v) {
+  var k = keyMap[code];
+  if (k) {
+    if (k === "jump" && v && !KEY.jump) KEY.jumpEdge = 1;
+    if (k === "run" && v && !KEY.run) KEY.runEdge = 1;
+    KEY[k] = v;
+    return true;
+  }
+  if (v && (code === "Enter" || code === "NumpadEnter" || code === "Space")) { KEY.start = 1; KEY.startEdge = 1; return true; }
+  return false;
+}
+window.addEventListener("keydown", function (e) {
+  if (setKey(e.code, 1)) e.preventDefault();
+  if (e.code === "Enter" || e.code === "NumpadEnter") { KEY.startEdge = 1; e.preventDefault(); }
+  if (e.code === "KeyM" && !e.repeat) toggleMute();
+  if ((e.code === "KeyP" || e.code === "Escape") && !e.repeat) togglePause();
+});
+window.addEventListener("keyup", function (e) { if (setKey(e.code, 0)) e.preventDefault(); });
+window.addEventListener("blur", function () { for (var k in KEY) KEY[k] = 0; });
+
+/* 触屏 */
+function bindTouch(id, key) {
+  var el = document.getElementById(id);
+  var on = function (e) { e.preventDefault(); if (key === "jump" && !KEY.jump) KEY.jumpEdge = 1; if (!KEY[key]) KEY.startEdge = 1; KEY[key] = 1; if (game.state === "title" || game.state === "gameover" || game.state === "win") doStart(); };
+  var off = function (e) { e.preventDefault(); KEY[key] = 0; };
+  el.addEventListener("touchstart", on, { passive: false });
+  el.addEventListener("touchend", off, { passive: false });
+  el.addEventListener("touchcancel", off, { passive: false });
+  el.addEventListener("mousedown", on);
+  el.addEventListener("mouseup", off);
+  el.addEventListener("mouseleave", off);
+}
+bindTouch("btnL", "left"); bindTouch("btnR", "right");
+bindTouch("btnA", "jump"); bindTouch("btnB", "run");
+
+/* ---------------- 小工具 ---------------- */
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function sign(v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
+function pad(n, len) { var s = "" + Math.floor(n); while (s.length < len) s = "0" + s; return s; }
+
+/* ============================================================
+   瓦片与关卡
+   ============================================================ */
+var TE = 0;   // 空气
+var TG = 1;   // 地面块
+var TB = 2;   // 砖块（可顶碎）
+var TQ = 3;   // 问号砖
+var TU = 4;   // 已顶过的方块
+var TH = 5;   // 硬块 / 台阶
+var PTL = 6, PTR = 7, PBL = 8, PBR = 9;  // 水管四块
+var TC = 10;  // 金币（可拾取）
+var TPOLE = 11; // 旗杆
+var TBRIDGE = 12; // 吊桥
+var TLAVA = 13; // 岩浆
+var THID = 14;  // 隐形方块
+var TENEMYBLOCK = 15; // 装饰用不可见
+
+var SOLID = {};
+SOLID[TG] = SOLID[TB] = SOLID[TQ] = SOLID[TU] = SOLID[TH] = 1;
+SOLID[PTL] = SOLID[PTR] = SOLID[PBL] = SOLID[PBR] = 1;
+SOLID[TBRIDGE] = 1;
+
+/* 道具种类 */
+var IT_NONE = 0, IT_COIN = 1, IT_MUSH = 2, IT_FLOWER = 3, IT_STAR = 4, IT_1UP = 5, IT_MULTI = 6;
+
+/* ---------------- 关卡定义 ---------------- */
+/* blocks 元素: [类型, x, y, 内容]  类型: 'B'砖 'Q'问号 'H'硬块 'h'隐形 */
+var LEVELS = [
+  /* ===== 1-1 地面关 ===== */
+  {
+    name: "1-1", time: 400, theme: "over", width: 212,
+    ground: [[0, 68], [71, 85], [89, 152], [155, 211]],
+    pipes: [[28, 2], [38, 3], [46, 4, 1], [57, 4, 1]],
+    blocks: [
+      ["Q", 16, 9, "coin"],
+      ["B", 20, 9], ["Q", 21, 9, "mush"], ["B", 22, 9], ["Q", 23, 9, "coin"], ["B", 24, 9],
+      ["Q", 22, 5, "coin"],
+      ["B", 77, 9], ["Q", 78, 9, "coin"], ["B", 79, 9],
+      ["B", 80, 5], ["B", 81, 5], ["B", 82, 5], ["Q", 83, 5, "coin"],
+      ["B", 91, 9], ["Q", 92, 9, "coin"], ["B", 93, 9],
+      ["B", 94, 9, "multi"], ["B", 95, 9], ["Q", 96, 9, "mush"], ["B", 97, 9],
+      ["B", 100, 5], ["B", 101, 5], ["B", 102, 5], ["B", 103, 5],
+      ["Q", 106, 9, "coin"],
+      ["B", 112, 9], ["B", 113, 9], ["Q", 114, 9, "star"], ["B", 115, 9],
+      ["B", 118, 5, "coin"], ["B", 119, 5, "coin"], ["B", 120, 5, "coin"],
+      ["h", 121, 9, "1up"],
+      ["B", 124, 9], ["Q", 125, 9, "coin"], ["B", 126, 9],
+      ["B", 129, 5], ["B", 130, 5], ["B", 131, 5],
+      ["Q", 134, 9, "mush"],
+      ["B", 138, 9], ["Q", 139, 9, "coin"], ["B", 140, 9],
+      ["Q", 144, 9, "coin"]
+    ],
+    stairs: [[146, "up", 4], [155, "down", 4], [181, "up", 8]],
+    coins: [[69, 10], [70, 10], [86, 9], [87, 9], [88, 9], [104, 10], [105, 10], [153, 10], [154, 10],
+            [104, 4], [105, 4], [106, 4]],
+    enemies: [["goomba", 22], ["goomba", 40], ["goomba", 52], ["goomba", 53], ["koopa", 60],
+              ["goomba", 80], ["goomba", 81], ["goomba", 97], ["goomba", 98], ["koopa", 106],
+              ["goomba", 116], ["goomba", 117], ["koopa", 126], ["goomba", 130], ["goomba", 138],
+              ["goomba", 141], ["koopa", 148]],
+    flag: 198, castle: 203
+  },
+
+  /* ===== 1-2 地下关 ===== */
+  {
+    name: "1-2", time: 400, theme: "under", width: 184, ceiling: true,
+    ground: [[0, 60], [63, 120], [124, 183]],
+    pipes: [[64, 3], [100, 4, 1], [110, 2], [172, 3]],
+    blocks: [
+      ["Q", 12, 9, "mush"],
+      ["B", 20, 9], ["B", 21, 9], ["Q", 22, 9, "coin"], ["B", 23, 9], ["B", 24, 9],
+      ["B", 20, 5], ["B", 21, 5], ["B", 22, 5], ["B", 23, 5], ["B", 24, 5],
+      ["B", 34, 9, "multi"], ["B", 35, 9], ["B", 36, 9], ["B", 37, 9],
+      ["Q", 50, 9, "coin"],
+      ["B", 52, 5], ["B", 53, 5], ["B", 54, 5], ["B", 55, 5],
+      ["B", 74, 9], ["Q", 75, 9, "star"], ["B", 76, 9],
+      ["h", 78, 9, "1up"],
+      ["B", 88, 4], ["B", 89, 4], ["B", 90, 4], ["B", 91, 4], ["B", 92, 4],
+      ["B", 88, 8], ["B", 89, 8], ["B", 90, 8], ["Q", 91, 8, "coin"], ["B", 92, 8],
+      ["B", 96, 2], ["B", 97, 2], ["B", 98, 2],
+      ["Q", 128, 9, "mush"],
+      ["B", 134, 6], ["B", 135, 6], ["B", 136, 6], ["B", 137, 6],
+      ["B", 142, 9], ["B", 143, 9], ["Q", 144, 9, "coin"], ["B", 145, 9],
+      ["Q", 156, 5, "coin"], ["Q", 157, 5, "coin"], ["Q", 158, 5, "coin"]
+    ],
+    stairs: [[106, "up", 3], [148, "up", 4], [160, "down", 4]],
+    coins: [[20, 7], [21, 7], [22, 7], [23, 7], [24, 7], [52, 7], [53, 7], [54, 7], [55, 7],
+            [88, 6], [89, 6], [90, 6], [91, 6], [92, 6],
+            [61, 10], [62, 10], [121, 10], [122, 10], [123, 10],
+            [134, 4], [135, 4], [136, 4], [137, 4]],
+    enemies: [["goomba", 16], ["goomba", 30], ["koopa", 42], ["goomba", 43], ["goomba", 44],
+              ["goomba", 68], ["koopa", 80], ["goomba", 84], ["goomba", 85], ["koopa", 96],
+              ["goomba", 102], ["goomba", 103], ["koopa", 118], ["goomba", 130], ["goomba", 131],
+              ["goombaR", 138], ["koopaR", 150]],
+    flag: 170, castle: 175
+  },
+
+  /* ===== 1-3 天空关 ===== */
+  {
+    name: "1-3", time: 300, theme: "over", width: 176,
+    ground: [[0, 24], [32, 44], [56, 68], [80, 92], [104, 116], [128, 175]],
+    pipes: [[8, 3, 1], [34, 4, 1], [60, 3], [140, 3, 1]],
+    blocks: [
+      ["Q", 14, 9, "mush"],
+      ["H", 27, 11], ["H", 28, 11], ["H", 29, 11],
+      ["H", 38, 8], ["H", 39, 8], ["Q", 40, 8, "coin"],
+      ["H", 46, 11], ["H", 47, 11], ["H", 48, 11],
+      ["H", 51, 11], ["H", 52, 11], ["H", 53, 11],
+      ["H", 62, 7], ["H", 63, 7], ["H", 64, 7], ["Q", 65, 7, "coin"],
+      ["H", 71, 11], ["H", 72, 11], ["H", 73, 11],
+      ["H", 76, 11], ["H", 77, 11],
+      ["H", 86, 7], ["H", 87, 7], ["Q", 88, 7, "star"],
+      ["H", 95, 11], ["H", 96, 11], ["H", 97, 11],
+      ["H", 100, 11], ["H", 101, 11],
+      ["H", 110, 9], ["B", 111, 9], ["Q", 112, 9, "mush"],
+      ["H", 119, 11], ["H", 120, 11], ["H", 121, 11],
+      ["H", 124, 11], ["H", 125, 11],
+      ["Q", 148, 9, "coin"], ["Q", 149, 9, "coin"],
+      ["H", 158, 11]
+    ],
+    stairs: [[152, "up", 5]],
+    coins: [[27, 9], [28, 9], [29, 9], [46, 9], [47, 9], [48, 9], [51, 9], [52, 9], [53, 9],
+            [71, 9], [72, 9], [73, 9], [76, 9], [77, 9], [95, 9], [96, 9], [97, 9],
+            [100, 9], [101, 9], [119, 9], [120, 9], [121, 9], [124, 9], [125, 9],
+            [26, 6], [30, 6], [94, 6], [102, 6]],
+    enemies: [["koopa", 18], ["goomba", 28], ["goomba", 40], ["goomba", 41],
+              ["koopa", 58], ["goomba", 65], ["goomba", 72], ["goomba", 84], ["goomba", 85],
+              ["koopa", 90], ["goomba", 96], ["goomba", 108], ["goomba", 109],
+              ["koopa", 132], ["goomba", 133], ["goomba", 134], ["koopa", 144]],
+    flag: 162, castle: 167
+  },
+
+  /* ===== 1-4 城堡关（库巴） ===== */
+  {
+    name: "1-4", time: 300, theme: "castle", width: 158, ceiling: true, boss: true,
+    ground: [[0, 21], [26, 51], [56, 81], [86, 111], [116, 130], [150, 157]],
+    lava: [[22, 25], [52, 55], [82, 85], [112, 115], [131, 149]],
+    bridge: [131, 149],
+    axe: 151,
+    blocks: [
+      ["H", 10, 9], ["H", 11, 9], ["B", 12, 9], ["H", 13, 9],
+      ["B", 30, 5], ["B", 31, 5], ["Q", 32, 5, "mush"], ["B", 33, 5],
+      ["H", 40, 9], ["H", 41, 9],
+      ["B", 62, 9], ["B", 63, 9], ["Q", 64, 9, "coin"], ["B", 65, 9],
+      ["H", 72, 5], ["H", 73, 5], ["H", 74, 5],
+      ["B", 92, 9], ["Q", 93, 9, "star"], ["B", 94, 9],
+      ["H", 100, 5], ["H", 101, 5], ["H", 102, 5],
+      ["Q", 118, 9, "mush"]
+    ],
+    firebars: [[34, 8, 5, 1], [66, 6, 4, -1], [96, 8, 5, 1]],
+    coins: [[30, 3], [31, 3], [32, 3], [33, 3]],
+    enemies: [["goomba", 16], ["koopaR", 44], ["goomba", 48], ["goombaR", 70],
+              ["koopaR", 88], ["goomba", 105], ["goomba", 124]],
+    bowser: 140
+  }
+];
+
+/* ---------------- 关卡构建 ---------------- */
+function buildLevel(def) {
+  var w = def.width;
+  var grid = new Uint8Array(w * ROWS);
+  var itm  = new Uint8Array(w * ROWS);
+  var vis  = new Uint8Array(w * ROWS);  // 1=可见(TQ/TB等)，用于动画
+  var i, j, x, y, k;
+  function set(x, y, t) { if (x >= 0 && x < w && y >= 0 && y < ROWS) grid[y * w + x] = t; }
+  function get(x, y) { if (x < 0 || x >= w || y < 0 || y >= ROWS) return (y >= ROWS) ? TG : TE; return grid[y * w + x]; }
+  function setItem(x, y, it) { if (x >= 0 && x < w && y >= 0 && y < ROWS) itm[y * w + x] = it; }
+
+  /* 地面 */
+  for (i = 0; i < def.ground.length; i++)
+    for (x = def.ground[i][0]; x <= def.ground[i][1]; x++) { set(x, 13, TG); set(x, 14, TG); }
+  /* 天花板（地下/城堡） */
+  if (def.ceiling) for (x = 0; x < w; x++) set(x, 0, TG);
+  /* 岩浆 */
+  if (def.lava) for (i = 0; i < def.lava.length; i++)
+    for (x = def.lava[i][0]; x <= def.lava[i][1]; x++) { set(x, 13, TLAVA); set(x, 14, TLAVA); }
+  /* 吊桥 */
+  if (def.bridge) for (x = def.bridge[0]; x <= def.bridge[1]; x++) set(x, 13, TBRIDGE);
+
+  /* 方块 */
+  for (i = 0; i < (def.blocks || []).length; i++) {
+    var b = def.blocks[i], t = TE, it = IT_NONE;
+    if (b[0] === "B") t = TB;
+    else if (b[0] === "Q") t = TQ;
+    else if (b[0] === "H") t = TH;
+    else if (b[0] === "h") t = THID;
+    if (b[3] === "coin") it = IT_COIN;
+    else if (b[3] === "mush") it = IT_MUSH;
+    else if (b[3] === "flower") it = IT_FLOWER;
+    else if (b[3] === "star") it = IT_STAR;
+    else if (b[3] === "1up") it = IT_1UP;
+    else if (b[3] === "multi") it = IT_MULTI;
+    set(b[1], b[2], t); setItem(b[1], b[2], it);
+  }
+  /* 水管 */
+  for (i = 0; i < (def.pipes || []).length; i++) {
+    var p = def.pipes[i], px = p[0], ph = p[1], top = 13 - ph;
+    set(px, top, PTL); set(px + 1, top, PTR);
+    for (y = top + 1; y <= 12; y++) { set(px, y, PBL); set(px + 1, y, PBR); }
+    if (p[2]) LEVEL_PIRANHA.push({ x: px, y: top });
+  }
+  /* 台阶 */
+  for (i = 0; i < (def.stairs || []).length; i++) {
+    var s = def.stairs[i], sx = s[0], dir = s[1], sh = s[2];
+    for (j = 0; j < sh; j++) {
+      var hh = (dir === "up") ? (j + 1) : (sh - j);
+      for (y = 13 - hh; y <= 12; y++) set(sx + j, y, TH);
+    }
+  }
+  /* 金币 */
+  for (i = 0; i < (def.coins || []).length; i++) set(def.coins[i][0], def.coins[i][1], TC);
+  /* 旗杆 */
+  if (def.flag !== undefined) {
+    for (y = 2; y <= 12; y++) set(def.flag, y, TPOLE);
+  }
+  /* 火棒 */
+  var firebars = [];
+  for (i = 0; i < (def.firebars || []).length; i++) {
+    var f = def.firebars[i];
+    set(f[0], f[1], TU);
+    firebars.push({ x: f[0], y: f[1], len: f[2], dir: f[3], ang: 0 });
+  }
+  return {
+    def: def, w: w, grid: grid, itm: itm, vis: vis,
+    get: get, set: set,
+    setItem: setItem,
+    firebars: firebars,
+    theme: def.theme
+  };
+}
+var LEVEL_PIRANHA = [];
+
+/* ---------------- 关卡背景装饰（视差用） ---------------- */
+function makeDecor(def, seed) {
+  var rnd = (function (s) { return function () { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; }; })(seed);
+  var hills = [], bushes = [], clouds = [];
+  var n = Math.floor(def.width / 12);
+  for (var i = 0; i < n; i++) {
+    var t = rnd();
+    if (t < 0.42) hills.push({ x: Math.floor(rnd() * def.width), big: rnd() > 0.5 });
+    else if (t < 0.78) bushes.push({ x: Math.floor(rnd() * def.width), n: 1 + Math.floor(rnd() * 3) });
+    clouds.push({ x: Math.floor(rnd() * def.width), y: 2 + Math.floor(rnd() * 3), small: rnd() > 0.6 });
+  }
+  return { hills: hills, bushes: bushes, clouds: clouds, w: def.width };
+}
+
+/* ============================================================
+   游戏状态
+   ============================================================ */
+var game = {
+  state: "title", score: 0, coins: 0, lives: 3,
+  levelIndex: 0, level: null, lvlW: 0,
+  time: 400, timeAcc: 0, camX: 0, camMax: 0,
+  tick: 0, timer: 0, decor: null,
+  flagY: 0, flagActive: false, axeUsed: false, bridgeT: 0,
+  bossDead: 0, hurry: false
+};
+var player = null;
+var enemies = [], items = [], fireballs = [], parts = [], pops = [], firebars = [], bowser = null, axe = null;
+var bumpList = [];   // 顶砖动画 {x,y,t}
+
+function resetEntities() {
+  enemies = []; items = []; fireballs = []; parts = []; pops = []; firebars = []; bowser = null; axe = null; bumpList = [];
+}
+
+/* ---------------- 瓦片查询 ---------------- */
+function solidAt(lvl, x, y) {
+  if (x < 0 || x >= lvl.w) return true;
+  if (y < 0) return false;
+  if (y >= ROWS) return false;
+  return !!SOLID[lvl.grid[y * lvl.w + x]];
+}
+function tileAt(lvl, x, y) {
+  if (x < 0 || x >= lvl.w || y < 0 || y >= ROWS) return TE;
+  return lvl.grid[y * lvl.w + x];
+}
+function setTile(lvl, x, y, t) {
+  if (x < 0 || x >= lvl.w || y < 0 || y >= ROWS) return;
+  lvl.grid[y * lvl.w + x] = t;
+}
+function surfaceRow(lvl, x) {
+  /* 从最底部向上找到第一处实心，再返回这叠实心的顶部 —— 即"可站立面" */
+  for (var y = ROWS - 1; y >= 0; y--) {
+    if (SOLID[tileAt(lvl, x, y)]) {
+      var top = y;
+      while (top - 1 >= 0 && SOLID[tileAt(lvl, x, top - 1)]) top--;
+      return top;
+    }
+  }
+  return ROWS;
+}
+
+/* ---------------- 关卡的入口 ---------------- */
+function loadLevel(idx) {
+  game.levelIndex = idx;
+  var def = LEVELS[idx];
+  LEVEL_PIRANHA = [];
+  game.level = buildLevel(def);
+  game.lvlW = game.level.w * TS;
+  game.decor = makeDecor(def, 1234 + idx * 77);
+  game.time = def.time; game.timeAcc = 0; game.hurry = false;
+  game.camX = 0; game.camMax = 0;
+  game.flagY = 0; game.flagActive = false; game.axeUsed = false; game.bridgeT = 0;
+  resetEntities();
+
+  /* 生成敌人 */
+  var lvl = game.level;
+  for (var i = 0; i < (def.enemies || []).length; i++) {
+    var e = def.enemies[i], type = e[0], tx = e[1];
+    var ry = surfaceRow(lvl, tx);
+    var px = tx * TS + 1, py = ry * TS;
+    if (type === "goomba" || type === "goombaR") enemies.push(makeGoomba(px, py, type === "goombaR"));
+    else enemies.push(makeKoopa(px, py, type === "koopaR"));
+  }
+  /* 食人花 */
+  for (i = 0; i < LEVEL_PIRANHA.length; i++) {
+    var pp = LEVEL_PIRANHA[i];
+    enemies.push(makePiranha(pp.x * TS + 1, pp.y * TS, pp.y));
+  }
+  /* 火棒 */
+  for (i = 0; i < lvl.firebars.length; i++) {
+    var f = lvl.firebars[i];
+    firebars.push({ cx: f.x * TS + 8, cy: f.y * TS + 8, len: f.len, dir: f.dir, ang: (f.dir > 0 ? 0 : Math.PI) });
+  }
+  /* 库巴 */
+  if (def.bowser !== undefined) bowser = makeBowser(def.bowser * TS, 13 * TS - 30);
+  /* 斧头 */
+  if (def.axe !== undefined) axe = { x: def.axe * TS + 2, y: 12 * TS - 2, w: 12, h: 16, t: 0 };
+
+  respawnPlayer(true);
+  game.state = "ready";
+  game.timer = 100;
+  updateHud();
+}
+
+function respawnPlayer(fresh) {
+  var lvl = game.level;
+  var startX = 32;
+  player = {
+    x: startX, y: (13 * TS) - 15, w: 12, h: 15, py: 0,
+    vx: 0, vy: 0, onGround: false, faceLeft: false,
+    power: fresh ? "small" : game.keepPower,
+    star: 0, invuln: 0, crouch: false, skid: false, jumping: false,
+    dead: false, deadTimer: 0, animTimer: 0, transform: 0, transformTo: null,
+    fireCool: 0, onSlide: false, slideX: 0, noCtrl: 0
+  };
+  if (!fresh && game.keepPower === "big") { player.h = 30; player.y = 13 * TS - 30; }
+  game.camX = 0; game.camMax = 0;
+}
+game.keepPower = "small";
+
+/* ============================================================
+   实体工厂
+   ============================================================ */
+function makeGoomba(x, y, red) {
+  return {
+    kind: "goomba", x: x, y: y - 14, w: 14, h: 14, vx: -ENEMY_SPEED, vy: 0,
+    onGround: false, state: "walk", t: 0, anim: 0, dead: false, active: false,
+    flip: false, flipVy: 0, rot: 0, red: !!red, score: 100
+  };
+}
+function makeKoopa(x, y, red) {
+  return {
+    kind: "koopa", x: x, y: y - 22, w: 12, h: 22, vx: -ENEMY_SPEED, vy: 0,
+    onGround: false, state: "walk", t: 0, anim: 0, dead: false, active: false,
+    flip: false, flipVy: 0, rot: 0, red: !!red, shellT: 0, score: 100
+  };
+}
+function makePiranha(x, top) {
+  var baseY = top * TS;
+  return {
+    kind: "piranha", x: x, y: baseY - 24 + 0, w: 14, h: 24, vx: 0, vy: 0,
+    onGround: true, state: "idle", t: 0, anim: 0, dead: false, active: false,
+    hideY: baseY, topY: baseY - 24, phase: Math.random() * Math.PI * 2, out: 0
+  };
+}
+function makeBowser(x, y) {
+  return {
+    kind: "bowser", x: x, y: y, w: 30, h: 30, vx: -0.6, vy: 0,
+    onGround: true, t: 0, hp: 5, dead: false, active: true,
+    faceLeft: true, jumpT: 60, fireT: 90, hurtT: 0, fall: false, anim: 0
+  };
+}
+function makeFireball(x, y, dir, owner) {
+  return { x: x, y: y, w: 8, h: 8, vx: 3.4 * dir, vy: 1.2, t: 0, owner: owner, dead: false, spin: 0 };
+}
+function makeItem(type, x, y, fromBlock) {
+  return {
+    type: type, x: x, y: y, w: 14, h: 14, vx: 0, vy: 0,
+    onGround: false, emerge: fromBlock ? 16 : 0, dead: false, t: 0, dir: 1,
+    startY: y, bounce: false, anim: 0
+  };
+}
+function addPop(x, y, text) { pops.push({ x: x, y: y, text: text, t: 0 }); }
+function addDebris(x, y) {
+  for (var i = 0; i < 4; i++) {
+    parts.push({
+      x: x + (i % 2) * 8, y: y + Math.floor(i / 2) * 8,
+      vx: (i % 2 ? 1.2 : -1.2), vy: (i < 2 ? -3.4 : -2.2), t: 0, spin: (i % 2 ? 1 : -1)
+    });
+  }
+}
+
+/* ============================================================
+   通用移动 / 碰撞
+   ============================================================ */
+function moveXEnt(e, lvl) {
+  e.hitWallR = false; e.hitWallL = false;
+  e.x += e.vx;
+  var y0 = Math.floor(e.y / TS), y1 = Math.floor((e.y + e.h - 0.01) / TS);
+  var y, xr, xl;
+  if (e.vx > 0) {
+    xr = Math.floor((e.x + e.w - 0.01) / TS);
+    for (y = y0; y <= y1; y++) if (solidAt(lvl, xr, y)) { e.x = xr * TS - e.w; e.vx = 0; e.hitWallR = true; break; }
+  } else if (e.vx < 0) {
+    xl = Math.floor(e.x / TS);
+    for (y = y0; y <= y1; y++) if (solidAt(lvl, xl, y)) { e.x = (xl + 1) * TS; e.vx = 0; e.hitWallL = true; break; }
+  }
+}
+function moveYEnt(e, lvl, onHead, onLand) {
+  e.y += e.vy;
+  var x0 = Math.floor(e.x / TS), x1 = Math.floor((e.x + e.w - 0.01) / TS);
+  var x, yb, yt, hit = -1;
+  e.onGround = false;
+  if (e.vy > 0) {
+    yb = Math.floor((e.y + e.h - 0.01) / TS);
+    for (x = x0; x <= x1; x++) if (solidAt(lvl, x, yb)) {
+      e.y = yb * TS - e.h; e.vy = 0; e.onGround = true;
+      if (onLand) onLand(x);
+      return;
+    }
+  } else if (e.vy < 0) {
+    yt = Math.floor(e.y / TS);
+    for (x = x0; x <= x1; x++) if (solidAt(lvl, x, yt)) { hit = x; }
+    if (hit >= 0) {
+      e.y = (yt + 1) * TS; e.vy = 0;
+      if (onHead) onHead(hit, yt);
+    }
+  }
+}
+function moveEnt(e, lvl) { moveXEnt(e, lvl); moveYEnt(e, lvl); }
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/* ============================================================
+   玩家逻辑
+   ============================================================ */
+function isBig() { return player.h > 20; }
+
+function playerHeadBox() { return { x: player.x + 1, y: player.y + 2, w: 10, h: 8 }; }
+
+function updatePlayer(lvl) {
+  if (game.state === "flag") {
+    var gy = 13 * TS - player.h;
+    if (player.y < gy) {
+      player.y = Math.min(player.y + 2.8, gy);
+      game.flagY = Math.min(game.flagY + 2.8, 9 * TS - 18);
+    }
+    return;
+  }
+  if (player.dead) {
+    player.deadTimer++;
+    player.vy = Math.min(player.vy + 0.35, 8);
+    player.y += player.vy;
+    if (player.deadTimer > 130) afterDeath();
+    return;
+  }
+  if (player.transform > 0) { player.transform--; return; }
+  if (player.noCtrl > 0) { player.noCtrl--; }
+
+  var ctrl = player.noCtrl <= 0 && game.state === "play";
+  var dir = 0;
+  if (ctrl) dir = (KEY.right ? 1 : 0) - (KEY.left ? 1 : 0);
+
+  /* 蹲下（仅大马里奥）
+     注意：KEY.down 是 0/1 数字，直接参与 && 会让 wantCrouch 变成数字 0 而不是 false，
+     而 0 !== false 恒为真 —— 这会让下面的分支在"根本没蹲下"时也执行 h = 30，
+     于是变小后的马里奥会在一帧内被顶回大 Mario。必须先归一成布尔值。 */
+  var wantCrouch = !!(isBig() && ctrl && KEY.down && player.onGround);
+  if (wantCrouch !== player.crouch) {
+    var crouchBottom = player.y + player.h;   /* 以底边为基准改身高，不穿地 */
+    if (wantCrouch) { player.h = 16; player.y = crouchBottom - 16; }
+    /* 只有确实处于蹲姿（h = 16）才恢复站立身高，
+       否则受伤后的小马里奥（h = 15）会被错误地设回 30 */
+    else if (player.h === 16) { player.h = 30; player.y = crouchBottom - 30; }
+    player.crouch = wantCrouch;
+  }
+  if (player.crouch) dir = 0;
+
+  var running = ctrl && KEY.run && !player.crouch;
+  var maxSpd = running ? MAX_RUN : MAX_WALK;
+  player.skid = false;
+
+  if (dir !== 0) {
+    player.faceLeft = dir < 0;
+    if (player.vx !== 0 && sign(player.vx) === -dir) {
+      player.vx += dir * DEC_SKID;
+      if (sign(player.vx) === -dir || Math.abs(player.vx) < DEC_SKID) player.vx = 0;
+      if (Math.abs(player.vx) > 0.4 && player.onGround) player.skid = true;
+    } else {
+      player.vx += dir * (running ? ACC_RUN : ACC_WALK);
+    }
+  } else {
+    if (Math.abs(player.vx) <= DEC_FRICTION) player.vx = 0;
+    else player.vx -= sign(player.vx) * DEC_FRICTION;
+  }
+  /* 松开加速键后逐渐回落到走路速度上限 */
+  if (!running && Math.abs(player.vx) > MAX_WALK) player.vx -= sign(player.vx) * 0.035;
+  if (player.vx > MAX_RUN * 1.15) player.vx = MAX_RUN * 1.15;
+  if (player.vx < -MAX_RUN * 1.15) player.vx = -MAX_RUN * 1.15;
+
+  /* 跳跃 */
+  if (ctrl && KEY.jumpEdge && player.onGround) {
+    var bonus = Math.abs(player.vx) / MAX_RUN;
+    player.vy = JUMP_VEL - bonus * 0.75;
+    player.onGround = false; player.jumping = true;
+    sfx.jump();
+  }
+  if (!KEY.jump) player.jumping = false;
+
+  /* 发射火球 */
+  if (player.fireCool > 0) player.fireCool--;
+  if (ctrl && player.power === "fire" && KEY.runEdge && player.fireCool === 0 && fireballs.length < 2) {
+    fireballs.push(makeFireball(player.x + (player.faceLeft ? -6 : player.w - 2), player.y + (isBig() ? 12 : 4), player.faceLeft ? -1 : 1, "p"));
+    player.fireCool = 14; sfx.fire();
+  }
+
+  /* 重力 */
+  var g = (player.vy < 0 && KEY.jump && player.jumping) ? GRAVITY_HOLD : GRAVITY;
+  player.vy = Math.min(player.vy + g, MAX_FALL);
+  if (player.vy > 0) player.jumping = false;
+  if (player.vy < MIN_FALL) player.vy = MIN_FALL;
+
+  player.py = player.y;
+  moveXEnt(player, lvl);
+  moveYEnt(player, lvl, onPlayerHead, null);
+
+  /* 世界边界 */
+  if (player.x < 0) { player.x = 0; player.vx = 0; }
+  if (player.x > game.lvlW - player.w) { player.x = game.lvlW - player.w; player.vx = 0; }
+  if (player.x < game.camX) { player.x = game.camX; player.vx = 0; }
+  if (player.y > VH + 32) { playerDie(); return; }
+
+  /* 掉入岩浆 */
+  if (touchingLava(lvl)) { playerDie(true); return; }
+
+  /* 收集金币 */
+  collectCoins(lvl);
+
+  /* 旗杆 */
+  if (!game.flagActive && lvl.def.flag !== undefined) {
+    var px = lvl.def.flag * TS;
+    if (player.x + player.w > px + 4 && player.x < px + 12) {
+      startFlag();
+    }
+  }
+  /* 斧头 */
+  if (axe && !game.axeUsed && aabb(player, axe)) useAxe();
+
+  /* 无敌时间 */
+  if (player.invuln > 0) player.invuln--;
+  if (player.star > 0) { player.star--; if (player.star === 0) {} }
+
+  /* 动画计时 */
+  player.animTimer += Math.abs(player.vx) * 0.22 + 0.035;
+}
+
+function onPlayerHead(tx, ty) {
+  var lvl = game.level;
+  var t = tileAt(lvl, tx, ty);
+  if (t === TQ || t === THID) {
+    setTile(lvl, tx, ty, TU);
+    var it = lvl.itm[ty * lvl.w + tx];
+    spawnFromBlock(tx, ty, it);
+    bumpList.push({ x: tx, y: ty, t: 10 });
+    sfx.bump();
+  } else if (t === TB) {
+    if (isBig() || player.star > 0) {
+      setTile(lvl, tx, ty, TE);
+      addDebris(tx * TS, ty * TS);
+      addScore(50);
+      sfx.breakBlock();
+      killEnemiesOnBlock(tx, ty);
+    } else {
+      bumpList.push({ x: tx, y: ty, t: 10 });
+      sfx.bump();
+      killEnemiesOnBlock(tx, ty);
+    }
+  } else if (t === TU || t === TH || t === TG) {
+    bumpList.push({ x: tx, y: ty, t: 10 });
+    if (t === TU || t === TG) sfx.bump();
+    killEnemiesOnBlock(tx, ty);
+  }
+}
+
+function killEnemiesOnBlock(tx, ty) {
+  var bx = tx * TS, by = ty * TS;
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (e.dead || e.flip || e.kind === "piranha" || e.kind === "bowser") continue;
+    if (e.x + e.w > bx && e.x < bx + TS && Math.abs((e.y + e.h) - by) < 10) {
+      flipEnemy(e);
+    }
+  }
+}
+
+function spawnFromBlock(tx, ty, it) {
+  var x = tx * TS + 1, y = ty * TS;
+  if (it === IT_COIN || it === IT_MULTI) {
+    items.push({ type: "blockcoin", x: x, y: y - 16, w: 16, h: 16, vy: -4.6, t: 0, y0: y - 16, dead: false, emerge: 0 });
+    gainCoin(); addScore(200);
+    if (it === IT_MULTI) { setTile(game.level, tx, ty, TB); game.level.itm[ty * game.level.w + tx] = IT_COIN; }
+    sfx.coin();
+  } else if (it === IT_MUSH) { items.push(makeItem("mush", x, y, true)); sfx.sprout(); }
+  else if (it === IT_FLOWER) { items.push(makeItem("flower", x, y, true)); sfx.sprout(); }
+  else if (it === IT_STAR) { items.push(makeItem("star", x, y, true)); sfx.sprout(); }
+  else if (it === IT_1UP) { items.push(makeItem("1up", x, y, true)); sfx.sprout(); }
+  else { setTile(game.level, tx, ty, TU); }
+}
+
+function touchingLava(lvl) {
+  var x0 = Math.floor(player.x / TS), x1 = Math.floor((player.x + player.w - 1) / TS);
+  var y0 = Math.floor(player.y / TS), y1 = Math.floor((player.y + player.h - 1) / TS);
+  for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) if (tileAt(lvl, x, y) === TLAVA) return true;
+  return false;
+}
+
+function collectCoins(lvl) {
+  var x0 = Math.floor(player.x / TS), x1 = Math.floor((player.x + player.w - 1) / TS);
+  var y0 = Math.floor(player.y / TS), y1 = Math.floor((player.y + player.h - 1) / TS);
+  for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) {
+    if (tileAt(lvl, x, y) === TC) {
+      setTile(lvl, x, y, TE);
+      addCoinFx(x * TS, y * TS);
+      sfx.coin();
+    }
+  }
+}
+function addCoinFx(x, y) {
+  items.push({ type: "blockcoin", x: x, y: y, w: 16, h: 16, vy: -3.2, t: 0, y0: y, dead: false });
+  gainCoin(); addScore(200);
+}
+function gainCoin() {
+  game.coins++;
+  if (game.coins >= 100) { game.coins -= 100; game.lives++; sfx.oneUp(); }
+  updateHud();
+}
+function addScore(n) { game.score += n; updateHud(); }
+
+/* ---------------- 玩家受伤 / 死亡 ---------------- */
+function hurtPlayer() {
+  if (player.invuln > 0 || player.star > 0 || player.dead) return;
+  if (player.power === "small") { playerDie(); return; }
+  /* 以底边为基准切换身高：蹲着受伤也不会一头扎进土里 */
+  var bottom = player.y + player.h;
+  player.power = "small";
+  player.crouch = false;
+  player.h = 15; player.y = bottom - 15;
+  player.transform = 40; player.transformTo = "small";
+  player.invuln = 110;
+  sfx.pipe();
+}
+function playerDie(instant) {
+  if (player.dead) return;
+  player.dead = true; player.deadTimer = 0;
+  player.vy = -5.0; player.vx = 0;
+  game.state = "dying";
+  stopMusic();
+  sfx.die();
+}
+function afterDeath() {
+  game.lives--;
+  if (game.lives <= 0) {
+    game.state = "gameover";
+    showScreen("GAME OVER", "GAME OVER", ["最终得分 <span class='k'>" + game.score + "</span>", "按 回车 重新开始"], "按 回车 重新开始");
+  } else {
+    loadLevel(game.levelIndex);
+  }
+}
+
+/* ---------------- 旗杆 / 通关 ---------------- */
+function startFlag() {
+  game.state = "flag";
+  game.flagActive = true;
+  var px = game.level.def.flag * TS;
+  player.x = px - 3;
+  player.vx = 0; player.vy = 2.6;
+  player.noCtrl = 9999;
+  player.faceLeft = false;
+  stopMusic();
+  sfx.flagpole();
+  var h = 12 - Math.floor(player.y / TS);
+  addScore(Math.max(200, h * 200));
+  game.flagY = 0;
+  game.timer = 30;
+}
+function updateFlag() {
+  var groundY = 13 * TS - player.h;
+  if (player.y < groundY - 0.5) return;      /* 还在顺杆下滑 */
+  game.timer--;
+  if (game.timer <= 0) {
+    player.faceLeft = false;
+    player.vx = 1.25;
+    player.x += player.vx;
+    player.animTimer += 0.34;
+    var castleX = game.level.def.castle !== undefined ? game.level.def.castle * TS : game.lvlW - 40;
+    if (player.x > castleX + 22) nextLevel();
+  }
+}
+function nextLevel() {
+  if (game.levelIndex >= LEVELS.length - 1) {
+    game.state = "win";
+    showScreen("THANK YOU!", "恭喜通关", [
+      "你救出了公主！", "总得分 <span class='k'>" + game.score + "</span>", "共收集金币 <span class='k'>" + game.coins + "</span>"
+    ], "按 回车 再玩一次");
+    stopMusic(); startMusic("win");
+    return;
+  }
+  game.keepPower = (player.power === "small") ? "small" : "big";
+  loadLevel(game.levelIndex + 1);
+}
+
+/* ============================================================
+   敌人逻辑
+   ============================================================ */
+function flipEnemy(e) {
+  e.flip = true; e.flipVy = -3.2;
+  addScore(100);
+  sfx.kick();
+}
+function stompEnemy(e) {
+  if (e.kind === "goomba") {
+    e.state = "squash"; e.t = 0; e.vx = 0;
+    /* 压扁后碰撞盒必须跟着变矮：14 -> 6，并把盒子下移 8px 保持底边贴地，
+       否则尸体还占着原来 14px 的身位，玩家落回地面时会被"死人"撞伤 */
+    e.h = 6; e.y += 8;
+    addScore(100); addPop(e.x, e.y - 8, "100");
+    sfx.stomp();
+  } else if (e.kind === "koopa") {
+    if (e.state === "walk") {
+      e.state = "shell"; e.t = 0; e.vx = 0;
+      e.h = 14; e.y += 8; e.w = 14; e.x -= 1;
+      addScore(100); addPop(e.x, e.y - 8, "100");
+      sfx.stomp();
+    } else if (e.state === "shell") {
+      e.state = "walk"; e.h = 22; e.y -= 8; e.w = 12; e.x += 1;
+      e.vx = -ENEMY_SPEED;
+      sfx.kick();
+    } else if (e.state === "shellMove") {
+      e.state = "shell"; e.vx = 0; e.t = 0;
+      sfx.stomp();
+    }
+  }
+}
+function kickShell(e) {
+  e.state = "shellMove";
+  e.vx = (player.x + player.w / 2 < e.x + e.w / 2) ? SHELL_SPEED : -SHELL_SPEED;
+  sfx.kick();
+}
+function updateEnemy(e, lvl) {
+  var camL = game.camX - 48, camR = game.camX + VW + 48;
+  if (!e.active) {
+    if (e.x < camR && e.x + e.w > camL - 200) e.active = true;
+    else return;
+  }
+  if (e.flip) {
+    e.flipVy += 0.35; e.y += e.flipVy; e.rot += 0.3;
+    if (e.y > VH + 60) e.dead = true;
+    return;
+  }
+  if (e.x < camL - 260) { e.dead = true; return; }
+
+  e.t++;
+  if (e.kind === "goomba" || e.kind === "koopa") {
+    if (e.state === "squash") { if (e.t > 34) e.dead = true; return; }
+    if (e.kind === "koopa" && e.state === "shell") {
+      e.vx = 0;
+      if (e.t > 340) { e.state = "walk"; e.h = 22; e.y -= 8; e.w = 12; e.x += 1; e.vx = -ENEMY_SPEED; e.t = 0; }
+    }
+    var spd = (e.kind === "koopa" && e.state === "shellMove") ? 1 : 1;
+    e.vy = Math.min(e.vy + GRAVITY, MAX_FALL);
+    /* 走到边缘是否掉下去：栗子怪会掉，乌龟也不停 */
+    var oldVx = e.vx;
+    moveXEnt(e, lvl);
+    if (e.hitWallR || e.hitWallL) { e.vx = -oldVx; if (e.vx === 0) e.vx = (e.hitWallR ? -ENEMY_SPEED : ENEMY_SPEED); }
+    if (e.kind === "koopa" && e.state === "shellMove" && (e.hitWallR || e.hitWallL)) e.vx = (e.hitWallR ? -SHELL_SPEED : SHELL_SPEED);
+    if (e.vx === 0 && e.state !== "shell") e.vx = (e.hitWallR ? -ENEMY_SPEED : ENEMY_SPEED);
+    moveYEnt(e, lvl);
+    if (e.y > VH + 40) { e.dead = true; return; }
+    e.anim += Math.abs(e.vx) * 0.16;
+    /* 撞到其他敌人 */
+    for (var i = 0; i < enemies.length; i++) {
+      var o = enemies[i];
+      if (o === e || o.dead || o.flip || o.kind === "piranha" || o.kind === "bowser") continue;
+      if (o.state === "squash") continue;
+      if (aabb(e, o)) {
+        if (e.kind === "koopa" && e.state === "shellMove") { flipEnemy(o); gapKillScore(); }
+        else if (o.kind === "koopa" && o.state === "shellMove") { flipEnemy(e); gapKillScore(); }
+      }
+    }
+  } else if (e.kind === "piranha") {
+    /* 食人花：靠近时不出土 */
+    var near = Math.abs((player.x + player.w / 2) - (e.x + e.w / 2)) < 42 && !player.dead;
+    var cycle = e.t % 220;
+    var wantOut = 0;
+    if (cycle < 80) wantOut = 1;
+    else if (cycle < 220 - 80) wantOut = 1;
+    else wantOut = 0;
+    if (near) wantOut = Math.min(wantOut, 0);
+    var target = wantOut ? 1 : 0;
+    e.out += (target - e.out) * 0.06;
+    e.y = e.hideY - 24 + (1 - e.out) * 24;
+    e.anim = cycle / 20;
+  }
+}
+
+var comboCount = 0;
+function gapKillScore() {
+  comboCount++;
+  addScore(100 * Math.pow(2, Math.min(comboCount, 3)));
+}
+
+function updateBowser(b) {
+  if (b.dead) return;
+  b.t++; b.anim += 0.1;
+  if (b.hurtT > 0) b.hurtT--;
+  if (b.fall) {
+    b.vy += 0.35; b.y += b.vy; b.x += b.vx;
+    if (b.y > VH + 60) b.dead = true;
+    return;
+  }
+  if (game.axeUsed) { b.fall = true; b.vy = -2; b.vx = -0.4; return; }
+  var lvl = game.level;
+  b.vy = Math.min(b.vy + GRAVITY, MAX_FALL);
+  b.x += b.vx;
+  var lo = 133 * TS, hi = 146 * TS;
+  if (b.x < lo) { b.x = lo; b.vx = Math.abs(b.vx); b.faceLeft = false; }
+  if (b.x + b.w > hi) { b.x = hi - b.w; b.vx = -Math.abs(b.vx); b.faceLeft = true; }
+  b.y += b.vy;
+  if (b.y + b.h > 13 * TS) { b.y = 13 * TS - b.h; b.vy = 0; }
+  b.jumpT--;
+  if (b.jumpT <= 0) { b.vy = -4.0; b.jumpT = 110 + Math.floor(Math.random() * 90); }
+  b.fireT--;
+  if (b.fireT <= 0 && !player.dead && game.state === "play") {
+    b.fireT = 130 + Math.floor(Math.random() * 90);
+    var dir = (player.x < b.x) ? -1 : 1;
+    fireballs.push(makeFireball(b.x + (dir < 0 ? -6 : b.w), b.y + 12, dir, "b"));
+    sfx.bowserFire();
+  }
+  /* 物理碰撞 */
+  moveYEnt(b, lvl);
+}
+
+function updateEnemies(lvl) {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (e.dead) continue;
+    updateEnemy(e, lvl);
+  }
+  for (i = enemies.length - 1; i >= 0; i--) if (enemies[i].dead) enemies.splice(i, 1);
+  if (comboCount > 0 && game.tick % 30 === 0) comboCount = 0;
+}
+
+/* 吊桥崩塌动画 */
+function updateBridge(lvl) {
+  if (game.bridgeT <= 0) return;
+  game.bridgeT++;
+  var start = lvl.def.bridge[1], end = lvl.def.bridge[0];
+  var step = Math.floor((game.bridgeT - 1) / 4);
+  for (var i = 0; i <= step && start - i >= end; i++) {
+    if (tileAt(lvl, start - i, 13) === TBRIDGE) {
+      setTile(lvl, start - i, 13, TE);
+      parts.push({ x: (start - i) * TS + 4, y: 13 * TS + 4, vx: 0.4, vy: 0, t: 0, spin: 1 });
+    }
+  }
+  if (game.bridgeT > 120) {
+    game.bridgeT = 0;
+    if (game.state === "play") {
+      game.state = "complete";
+      game.timer = 90;
+      startMusic("clear");
+    }
+  }
+}
+
+/* ---------------- 玩家与敌人交互 ---------------- */
+function playerEnemyCollisions() {
+  if (player.dead || player.transform > 0 || game.state !== "play") return;
+  if (bowser && !bowser.dead && !bowser.fall && aabb(player, bowser)) {
+    if (player.star > 0) bowserHit(); else hurtPlayer();
+    if (player.dead) return;
+  }
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    /* squash = 已被踩扁的尸体，保留在数组里只为播 34 帧动画，不再有任何碰撞伤害 */
+    if (e.dead || e.flip || e.state === "squash") continue;
+    if (e.kind === "piranha") {
+      if (e.out > 0.45 && aabb(player, { x: e.x, y: e.y + 8, w: e.w, h: e.h - 8 })) { hurtOrStar(e); if (player.dead) return; }
+      continue;
+    }
+    if (!aabb(player, e)) continue;
+    if (player.star > 0) { flipEnemy(e); continue; }
+    var falling = player.vy > 0;
+    var wasAbove = (player.py + player.h) <= e.y + 6;
+    if (falling && wasAbove) {
+      stompEnemy(e);
+      if (KEY.jump) player.vy = -4.3; else player.vy = -3.1;
+      player.onGround = false;
+    } else if (e.kind === "koopa" && e.state === "shell") {
+      kickShell(e);
+    } else {
+      hurtPlayer();
+      if (player.dead) return;
+    }
+  }
+}
+function hurtOrStar(e) {
+  if (player.star > 0) flipEnemy(e); else hurtPlayer();
+}
+function bowserHit() {
+  bowser.hp--; bowser.hurtT = 30;
+  addScore(200);
+  sfx.kick();
+  if (bowser.hp <= 0) {
+    bowser.fall = true; bowser.vy = -3; bowser.vx = 0.3;
+    addScore(3000); addPop(bowser.x, bowser.y, "3000");
+    game.bossDead = 60;
+  }
+}
+function useAxe() {
+  game.axeUsed = true;
+  stopMusic();
+  sfx.bridgeCollapse();
+  addScore(1000);
+  game.bridgeT = 1;
+}
+
+/* ============================================================
+   道具 / 火球 / 粒子
+   ============================================================ */
+function updateItems(lvl) {
+  for (var i = items.length - 1; i >= 0; i--) {
+    var it = items[i];
+    it.t++;
+    if (it.type === "blockcoin") {
+      it.vy += 0.28; it.y += it.vy;
+      if (it.t > 46) { it.dead = true; }
+    } else {
+      if (it.emerge > 0) {
+        it.emerge--; it.y = it.startY - (16 - it.emerge);
+        if (it.emerge === 0) {
+          it.y = it.startY;
+          if (it.type === "mush" || it.type === "1up") it.vx = it.dir * 0.85;
+          if (it.type === "star") { it.vx = 1.0; it.vy = -3.4; }
+        }
+      } else {
+        if (it.type === "mush" || it.type === "1up") {
+          it.vy = Math.min(it.vy + GRAVITY, MAX_FALL);
+          var ov = it.vx; moveXEnt(it, lvl);
+          if (it.hitWallL || it.hitWallR || it.vx === 0) { it.vx = -ov; if (it.vx === 0) it.vx = 0.85; }
+          moveYEnt(it, lvl);
+        } else if (it.type === "star") {
+          it.vy = Math.min(it.vy + 0.30, MAX_FALL);
+          var ov2 = it.vx; moveXEnt(it, lvl);
+          if (it.hitWallL || it.hitWallR || it.vx === 0) { it.vx = -ov2; if (it.vx === 0) it.vx = 1.0; }
+          var wasDown = it.vy > 0;
+          moveYEnt(it, lvl);
+          if (wasDown && it.onGround) it.vy = -4.0;
+        }
+      }
+      if (it.y > VH + 60) it.dead = true;
+    }
+    /* 拾取 */
+    if (!it.dead && player && !player.dead && it.emerge === 0 && aabb(player, it)) {
+      if (it.type === "mush") { growPlayer("big"); it.dead = true; addScore(1000); }
+      else if (it.type === "flower") { growPlayer("fire"); it.dead = true; addScore(1000); }
+      else if (it.type === "star") { player.star = 600; it.dead = true; addScore(1000); startMusic("star"); }
+      else if (it.type === "1up") { game.lives++; it.dead = true; sfx.oneUp(); updateHud(); }
+    }
+    if (it.dead && it.type !== "blockcoin") { }
+  }
+  for (i = items.length - 1; i >= 0; i--) if (items[i].dead) items.splice(i, 1);
+}
+function growPlayer(power) {
+  sfx.powerup();
+  if (power === "big") {
+    if (player.power === "small") {
+      var b1 = player.y + player.h;          /* 以底边为基准长高 */
+      player.transform = 44; player.transformTo = "big";
+      player.power = "big";
+      player.crouch = false;
+      player.h = 30; player.y = b1 - 30;
+    }
+  } else if (power === "fire") {
+    if (player.power === "small") {
+      var b2 = player.y + player.h;
+      player.crouch = false;
+      player.h = 30; player.y = b2 - 30;
+    }
+    player.power = "fire";
+  }
+}
+
+function updateFireballs(lvl) {
+  for (var i = fireballs.length - 1; i >= 0; i--) {
+    var f = fireballs[i];
+    f.t++; f.spin += 0.4;
+    f.vy = Math.min(f.vy + 0.32, 5);
+    var ov = f.vx;
+    moveXEnt(f, lvl);
+    if (f.hitWallL || f.hitWallR) { f.dead = true; }
+    var down = f.vy > 0;
+    moveYEnt(f, lvl);
+    if (down && f.onGround) f.vy = -3.0;
+    if (f.t > 260 || f.x < game.camX - 32 || f.x > game.camX + VW + 32) f.dead = true;
+    if (f.y > VH + 40) f.dead = true;
+    /* 命中敌人 */
+    if (!f.dead && f.owner === "p") {
+      for (var j = 0; j < enemies.length; j++) {
+        var e = enemies[j];
+        if (e.dead || e.flip || e.state === "squash") continue;
+        if (e.kind === "piranha" && e.out < 0.4) continue;
+        if (aabb(f, e)) {
+          f.dead = true;
+          if (e.kind === "bowser") { bowserHit(); }
+          else { flipEnemy(e); addPop(e.x, e.y, "200"); addScore(100); }
+          break;
+        }
+      }
+    }
+    /* 命中玩家 */
+    if (!f.dead && f.owner === "b" && !player.dead && aabb(f, player)) {
+      f.dead = true;
+      if (player.star > 0) {} else hurtPlayer();
+    }
+  }
+  for (i = fireballs.length - 1; i >= 0; i--) if (fireballs[i].dead) fireballs.splice(i, 1);
+}
+
+function updateParticles() {
+  for (var i = parts.length - 1; i >= 0; i--) {
+    var p = parts[i];
+    p.t++; p.vy += 0.36; p.x += p.vx; p.y += p.vy;
+    if (p.y > VH + 40) parts.splice(i, 1);
+  }
+  for (i = pops.length - 1; i >= 0; i--) {
+    pops[i].t++;
+    if (pops[i].t % 2 === 0) pops[i].y--;
+    if (pops[i].t > 50) pops.splice(i, 1);
+  }
+  for (i = bumpList.length - 1; i >= 0; i--) { bumpList[i].t--; if (bumpList[i].t <= 0) bumpList.splice(i, 1); }
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+var S = cv.width / VW;
+function fill(c, x, y, w, h) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+
+var THEMES = {
+  over:   { sky: "#5c94fc", gMain: "#e45c10", gDark: "#7c3800", gLite: "#f8a060",
+            bMain: "#c84c0c", bDark: "#7c2800", hill: "#00a800", hillD: "#006000", sky2: "#74aafc" },
+  under:  { sky: "#000000", gMain: "#3cbcfc", gDark: "#0058f8", gLite: "#a8e0fc",
+            bMain: "#2038ec", bDark: "#0018a8", hill: "#0058f8", hillD: "#0018a8", sky2: "#000000" },
+  castle: { sky: "#000000", gMain: "#909090", gDark: "#404040", gLite: "#c8c8c8",
+            bMain: "#909090", bDark: "#404040", hill: "#606060", hillD: "#303030", sky2: "#000000" }
+};
+
+function drawGround(x, y, th) {
+  fill(th.gDark, x, y, 16, 16);
+  fill(th.gMain, x + 1, y + 1, 14, 14);
+  fill(th.gLite, x + 1, y + 1, 14, 1);
+  fill(th.gDark, x + 1, y + 2, 2, 2); fill(th.gDark, x + 13, y + 2, 2, 2);
+  fill(th.gDark, x + 1, y + 12, 2, 2); fill(th.gDark, x + 13, y + 12, 2, 2);
+  fill(th.gDark, x + 7, y + 7, 2, 2);
+}
+function drawBrick(x, y, th) {
+  fill("#000000", x, y, 16, 16);
+  fill(th.bMain, x + 1, y + 1, 14, 14);
+  fill(th.gLite, x + 1, y + 1, 14, 1);
+  fill("#000000", x, y + 4, 16, 1);
+  fill("#000000", x, y + 9, 16, 1);
+  fill("#000000", x, y + 15, 16, 1);
+  fill("#000000", x + 5, y + 1, 1, 3);
+  fill("#000000", x + 11, y + 1, 1, 3);
+  fill("#000000", x + 8, y + 5, 1, 4);
+  fill("#000000", x + 3, y + 10, 1, 5);
+  fill("#000000", x + 12, y + 10, 1, 5);
+}
+function drawQ(x, y, tick) {
+  var f = Math.floor(tick / 9) % 6;
+  var c = [ "#f8b800", "#f8c000", "#f8d000", "#f8d800", "#f8c800", "#f8b800" ][f];
+  fill("#000000", x, y, 16, 16);
+  fill(c, x + 1, y + 1, 14, 14);
+  fill("#fce8a0", x + 1, y + 1, 14, 1);
+  fill("#a05000", x + 1, y + 14, 14, 1);
+  fill("#000000", x + 2, y + 2, 2, 2); fill("#000000", x + 12, y + 2, 2, 2);
+  fill("#000000", x + 2, y + 12, 2, 2); fill("#000000", x + 12, y + 12, 2, 2);
+  /* ? */
+  fill("#7c3800", x + 6, y + 4, 5, 2); fill("#7c3800", x + 10, y + 5, 2, 3);
+  fill("#7c3800", x + 8, y + 8, 2, 2);
+  fill("#7c3800", x + 7, y + 10, 2, 2);
+  fill("#7c3800", x + 7, y + 13, 2, 2);
+  fill("#ffffff", x + 5, y + 3, 5, 2); fill("#ffffff", x + 9, y + 4, 2, 3);
+  fill("#ffffff", x + 8, y + 7, 2, 2);
+  fill("#ffffff", x + 6, y + 9, 2, 2);
+  fill("#ffffff", x + 6, y + 12, 2, 2);
+}
+function drawUsed(x, y, th) {
+  fill("#000000", x, y, 16, 16);
+  fill("#a05000", x + 1, y + 1, 14, 14);
+  fill("#d08028", x + 1, y + 1, 14, 1);
+  fill("#5c2800", x + 1, y + 14, 14, 1);
+  fill("#5c2800", x + 2, y + 2, 2, 2); fill("#5c2800", x + 12, y + 2, 2, 2);
+  fill("#5c2800", x + 2, y + 12, 2, 2); fill("#5c2800", x + 12, y + 12, 2, 2);
+}
+function drawHard(x, y, th) {
+  fill("#000000", x, y, 16, 16);
+  fill(th.gMain, x + 1, y + 1, 14, 14);
+  fill(th.gLite, x + 1, y + 1, 14, 1);
+  fill(th.gDark, x + 4, y + 4, 8, 8);
+  fill(th.gMain, x + 5, y + 5, 6, 6);
+}
+function drawPipe(x, y, t, th) {
+  var m = "#00a800", d = "#005000", l = "#58d854";
+  var isTop = (t === PTL || t === PTR);
+  var left = (t === PTL || t === PBL);
+  if (isTop) {
+    fill(m, x, y, 16, 16);
+    fill("#000000", x, y, 16, 1);
+    fill(l, x, y + 1, 16, 2);
+    fill(d, x, y + 14, 16, 2);
+    if (left) { fill("#000000", x, y, 1, 16); fill(l, x + 2, y + 3, 2, 11); }
+    else { fill("#000000", x + 15, y, 1, 16); fill(d, x + 12, y + 3, 3, 11); }
+  } else {
+    fill(m, x + 1, y, 14, 16);
+    fill("#000000", x + 1, y, 1, 16);
+    fill("#000000", x + 14, y, 1, 16);
+    if (left) fill(l, x + 3, y, 2, 16);
+    else fill(d, x + 10, y, 4, 16);
+  }
+}
+function drawLava(x, y, tick) {
+  fill("#c80000", x, y, 16, 16);
+  var o = Math.floor((Math.sin((x * 0.7 + tick * 0.08)) * 2 + 2));
+  fill("#f83800", x, y + o, 16, 16 - o);
+  fill("#f8b800", x, y + o, 16, 2);
+  fill("#fce8a0", x + ((tick / 4 + x) % 16), y + o, 2, 2);
+}
+function drawPole(x, y, lvl) {
+  var px = x + 7;
+  if (y === 2 * TS) {
+    fill("#006000", px - 2, y + 4, 6, 12);
+    fill("#00a800", px - 1, y + 5, 4, 10);
+    fill("#58d854", px - 1, y + 6, 2, 6);
+  } else {
+    fill("#006000", px, y, 2, 16);
+    fill("#00a800", px, y, 1, 16);
+  }
+}
+function drawBridge(x, y) {
+  fill("#c84c0c", x, y + 4, 16, 2);
+  fill("#7c2800", x, y + 6, 16, 1);
+  fill("#8c4a00", x, y + 7, 16, 2);
+  fill("#5c2800", x, y + 9, 16, 1);
+}
+
+/* ---------- 背景视差 ---------- */
+var CLOUD_SPR = makePair([
+  "......WWWWWW......",
+  "....WWWWWWWWWW....",
+  "..WWWWWWWWWWWWWW..",
+  ".WWWWWWWWWWWWWWWW.",
+  "WWWWWWWWWWWWWWWWWW",
+  "WWWWWWWWWWWWWWWWWW",
+  "WWWWWWWWWWWWWWWWWW",
+  "WWWWWWWWWWWWWWWWWW",
+  ".WWWWWWWWWWWWWWWW.",
+  "..EEEEEEEEEEEEEE.."
+]);
+function hex2rgb(h) {
+  return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)];
+}
+function mixHex(a, b, t) {
+  var x = hex2rgb(a), y = hex2rgb(b);
+  return "#" + [0, 1, 2].map(function (i) {
+    var v = Math.round(x[i] + (y[i] - x[i]) * t).toString(16);
+    return v.length < 2 ? "0" + v : v;
+  }).join("");
+}
+function vgrad(y0, y1, c0, c1, steps) {
+  steps = steps || 16;
+  for (var i = 0; i < steps; i++) {
+    var yy = Math.round(y0 + (y1 - y0) * i / steps);
+    var yy2 = Math.round(y0 + (y1 - y0) * (i + 1) / steps);
+    fill(mixHex(c0, c1, i / (steps - 1)), 0, yy, VW, yy2 - yy + 1);
+  }
+}
+function drawCloud(x, y, small) {
+  var s = small ? 0.75 : 1;
+  var img = CLOUD_SPR;
+  if (s === 1) drawSpr(img, Math.round(x), Math.round(y), false);
+  else {
+    ctx.save();
+    ctx.translate(Math.round(x), Math.round(y));
+    ctx.scale(s, s);
+    ctx.drawImage(img.r, 0, 0);
+    ctx.restore();
+  }
+}
+var BUSH_SPR = makePair([
+  "......GGGG......",
+  "....GGGGGGGG....",
+  "..DGGGGGGGGGGD..",
+  ".DGGGGGGGGGGGGD.",
+  "DGGGGGGGGGGGGGGD",
+  "GGGGGGGGGGGGGGGG",
+  "GGGGGGGGGGGGGGGG",
+  "GGGggggggggggGGG",
+  "GGGggggggggggGGG",
+  "DGGGGGGGGGGGGGGD",
+  ".DDDDDDDDDDDDDD."
+]);
+function drawHill(x, y, big, th) {
+  var w = big ? 76 : 46, h = big ? 40 : 24;
+  var i, t, ww;
+  for (i = 0; i < h; i++) {
+    t = i / h;
+    ww = Math.max(1, Math.round(w * Math.sqrt(1 - t * t)));
+    fill(th.hillD, Math.round(x + (w - ww) / 2), y - i, ww, 1);
+  }
+  for (i = 0; i < h - 2; i++) {
+    t = (i + 2) / h;
+    ww = Math.max(1, Math.round((w - 4) * Math.sqrt(1 - t * t)));
+    fill(th.hill, Math.round(x + (w - ww) / 2), y - i, ww, 1);
+  }
+  fill("#000000", Math.round(x + w / 2 - 7), y - 8, 3, 3);
+  fill("#000000", Math.round(x + w / 2 + 4), y - 8, 3, 3);
+  fill("#000000", Math.round(x + w / 2 - 8), y - 4, 5, 2);
+  fill("#000000", Math.round(x + w / 2 + 3), y - 4, 5, 2);
+  fill("#000000", Math.round(x + w / 2 - 3), y - 3, 6, 2);
+}
+function drawBush(x, y, n, th) {
+  for (var i = 0; i < n; i++) {
+    var bx = x + i * 13;
+    var dy = (n > 1 && (i === 0 || i === n - 1)) ? 3 : 0;
+    drawSpr(BUSH_SPR, Math.round(bx), Math.round(y - BUSH_SPR.r.height + dy), false);
+  }
+}
+function drawBG(lvl, th) {
+  fill(th.sky, 0, 0, VW, VH);
+  if (lvl.theme === "over") {
+    vgrad(0, VH, th.sky2, th.sky, 24);
+    var d = game.decor, i;
+    for (i = 0; i < d.clouds.length; i++) {
+      var c = d.clouds[i];
+      var sx = c.x * TS - game.camX * 0.45;
+      if (sx > -60 && sx < VW + 60) drawCloud(sx, c.y * TS, c.small);
+    }
+    for (i = 0; i < d.hills.length; i++) {
+      var h = d.hills[i];
+      var sx2 = h.x * TS - game.camX * 0.72;
+      if (sx2 > -120 && sx2 < VW + 120) drawHill(sx2, 13 * TS, h.big, th);
+    }
+    for (i = 0; i < d.bushes.length; i++) {
+      var b = d.bushes[i];
+      var sx3 = b.x * TS - game.camX;
+      if (sx3 > -80 && sx3 < VW + 80) drawBush(sx3, 13 * TS, b.n, th);
+    }
+  } else if (lvl.theme === "under") {
+    fill("#000000", 0, 0, VW, VH);
+  } else {
+    fill("#000000", 0, 0, VW, VH);
+    for (var px = -((game.camX * 0.5) % 64); px < VW + 64; px += 64) {
+      fill("#181818", px, 0, 26, 13 * TS);
+      fill("#0c0c0c", px + 4, 0, 4, 13 * TS);
+    }
+  }
+}
+
+/* ---------- 城堡 ---------- */
+function drawCastle(px, th) {
+  var x = Math.round(px - game.camX), y = 13 * TS;
+  var m = "#c84c0c", mk = "#7c2800";
+  var i;
+  /* 中央塔 */
+  fill(m, x + 24, y - 96, 32, 96);
+  for (i = 0; i < 3; i++) fill(m, x + 24 + i * 12, y - 104, 8, 8);
+  /* 主楼 */
+  fill(m, x, y - 64, 80, 64);
+  for (i = 0; i < 4; i++) fill(m, x + i * 20, y - 72, 12, 8);
+  /* 砖缝 */
+  for (i = 1; i < 4; i++) fill(mk, x, y - 64 + i * 16, 80, 1);
+  for (i = 0; i < 5; i++) {
+    fill(mk, x + i * 16 + 15, y - 64, 1, 16);
+    fill(mk, x + i * 16 + 7, y - 48, 1, 16);
+    fill(mk, x + i * 16 + 15, y - 32, 1, 16);
+    fill(mk, x + i * 16 + 7, y - 16, 1, 16);
+  }
+  /* 塔身砖缝 */
+  fill(mk, x + 24, y - 96, 1, 32);
+  fill(mk, x + 55, y - 96, 1, 32);
+  fill(mk, x + 24, y - 80, 32, 1);
+  fill(mk, x + 24, y - 64, 32, 1);
+  /* 门 */
+  fill(mk, x + 30, y - 30, 20, 30);
+  fill("#000000", x + 32, y - 28, 16, 28);
+  fill(mk, x + 30, y - 34, 20, 4);
+  /* 窗 */
+  fill(mk, x + 10, y - 50, 10, 12); fill(mk, x + 60, y - 50, 10, 12);
+  fill("#f8b800", x + 12, y - 48, 6, 8); fill("#f8b800", x + 62, y - 48, 6, 8);
+}
+
+/* ---------- 所有瓦片 ---------- */
+function drawLevel(lvl, th) {
+  var x0 = Math.max(0, Math.floor(game.camX / TS) - 1);
+  var x1 = Math.min(lvl.w - 1, Math.floor((game.camX + VW) / TS) + 1);
+  var tick = game.tick;
+  var bumpMap = {};
+  for (var b = 0; b < bumpList.length; b++) {
+    var bp = bumpList[b];
+    bumpMap[bp.x + "," + bp.y] = -Math.sin((10 - bp.t) / 10 * Math.PI) * 8;
+  }
+  for (var y = 0; y < ROWS; y++) {
+    for (var x = x0; x <= x1; x++) {
+      var t = lvl.grid[y * lvl.w + x];
+      if (!t) continue;
+      var sx = Math.round(x * TS - game.camX);
+      var dy = bumpMap[x + "," + y] || 0;
+      var sy = y * TS + dy;
+      switch (t) {
+        case TG: drawGround(sx, sy, th); break;
+        case TB: drawBrick(sx, sy, th); break;
+        case TQ: drawQ(sx, sy, tick); break;
+        case TU: drawUsed(sx, sy, th); break;
+        case TH: drawHard(sx, sy, th); break;
+        case PTL: case PTR: case PBL: case PBR: drawPipe(sx, sy, t, th); break;
+        case TC: drawSpr(SPR.coin[Math.floor(tick / 7) % 4], sx, sy, false); break;
+        case TPOLE: drawPole(sx, sy, lvl); break;
+        case TBRIDGE: drawBridge(sx, sy); break;
+        case TLAVA: drawLava(sx, sy, tick); break;
+      }
+    }
+  }
+}
+
+/* ---------- 马里奥 ---------- */
+function playerAnimKey() {
+  if (player.dead) return "dead";
+  if (player.transform > 0) return Math.floor(player.transform / 5) % 2 ? "walk1" : "stand";
+  if (player.crouch) return "stand";
+  if (!player.onGround) return "jump";
+  if (player.skid) return "skid";
+  if (Math.abs(player.vx) > 0.12) return ["walk0", "walk1", "walk2"][Math.floor(player.animTimer) % 3];
+  return "stand";
+}
+function drawPlayer() {
+  if (!player) return;
+  if (player.invuln > 0 && Math.floor(game.tick / 3) % 2 === 0 && game.state === "play") return;
+  var key = playerAnimKey();
+  var big = player.h > 20;
+  /* 变大 / 变小的过渡动画：在"原体型"和"目标体型"之间闪烁，和原作一致。
+     两种体型都以碰撞盒底边对齐（见下方 dy 计算），所以切换时脚底不会跳。 */
+  if (player.transform > 0) {
+    var showTarget = Math.floor(player.transform / 4) % 2 === 0;
+    big = showTarget ? (player.transformTo === "big") : (player.transformTo !== "big");
+  }
+  var sp;
+  if (player.star > 0) {
+    var vi = Math.floor(game.tick / 3) % 3;
+    sp = (big ? BIG_S[vi] : SMALL_S[vi])[key];
+  } else if (player.power === "fire") {
+    sp = (big ? BIG_F : SMALL_F)[key];
+  } else {
+    sp = (big ? BIG : SMALL)[key];
+  }
+  var sw = 16, sh = big ? 32 : 16;
+  var dx = player.x - game.camX - 2;
+  var dy = player.y + (player.h - sh);
+  if (player.crouch) {
+    ctx.save();
+    ctx.translate(Math.round(dx), Math.round(dy + sh));
+    ctx.scale(1, 0.62);
+    drawSpr(sp, 0, -sh, player.faceLeft);
+    ctx.restore();
+  } else if (game.state === "flag" && player.y < 13 * TS - player.h - 1) {
+    /* 顺杆下滑：贴着杆子 */
+    drawSpr(sp, dx + 4, dy, player.faceLeft);
+  } else {
+    drawSpr(sp, dx, dy, player.faceLeft);
+  }
+}
+
+/* ---------- 敌人 ---------- */
+function drawEnemies() {
+  var i, e, sx, sy;
+  for (i = 0; i < enemies.length; i++) {
+    e = enemies[i];
+    if (!e.active && !e.flip) continue;
+    sx = Math.round(e.x - game.camX); sy = Math.round(e.y);
+    if (sx < -40 || sx > VW + 40) continue;
+    if (e.kind === "goomba") {
+      if (e.state === "squash") {
+        /* 以碰撞盒底边对齐绘制，盒子压矮后画面位置保持不变 */
+        drawSpr(SPR.goombaFlat, sx - 1, sy + e.h - SPR.goombaFlat.r.height, false);
+        continue;
+      }
+      var f = Math.floor(e.anim) % 2;
+      var spg = e.red ? SPR.goomba[f] : SPR.goomba[f];
+      drawFlipped(SPR.goomba[f], sx - 1, sy - 2, e.flip, e.rot);
+    } else if (e.kind === "koopa") {
+      if (e.flip) { drawFlipped(SPR.shell[0], sx - 2, sy - 2, true, e.rot); continue; }
+      if (e.state === "walk") {
+        var fk = Math.floor(e.anim) % 2;
+        var set = e.red ? SPR.koopaR : SPR.koopa;
+        drawSpr(set[fk], sx - 2, sy - 2, e.vx > 0);
+      } else {
+        var sh = e.red ? SPR.shellR[0] : SPR.shell[0];
+        var wob = (e.state === "shell" && e.t > 260 && Math.floor(e.t / 4) % 2) ? 1 : 0;
+        drawSpr(sh, sx - 1, sy - 2 + wob, e.vx > 0);
+      }
+    } else if (e.kind === "piranha") {
+      var clipTop = e.hideY - 24;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(sx - 4, e.hideY - 24, 24, 24);
+      ctx.clip();
+      drawSpr(SPR.piranha[Math.floor(e.anim) % 2], sx - 1, sy, e.x > player.x);
+      ctx.restore();
+    }
+  }
+  if (bowser && !bowser.dead) drawBowser(bowser);
+}
+function drawFlipped(sp, x, y, flip, rot) {
+  if (flip) {
+    ctx.save();
+    ctx.translate(x + 8, y + 8); ctx.rotate(rot || 0);
+    ctx.scale(1, -1);
+    ctx.drawImage(sp.r, -8, -8);
+    ctx.restore();
+  } else drawSpr(sp, x, y, false);
+}
+function drawBowser(b) {
+  var x = Math.round(b.x - game.camX), y = Math.round(b.y);
+  var hurt = b.hurtT > 0 && Math.floor(b.hurtT / 4) % 2 === 0;
+  var body = hurt ? "#fcfcfc" : "#00a800";
+  var belly = hurt ? "#fcfcfc" : "#f8b800";
+  /* 壳 */
+  fill("#006000", x + 8, y + 7, 22, 18);
+  fill(body, x + 9, y + 8, 20, 16);
+  /* 壳刺 */
+  fill("#fcfcfc", x + 24, y + 4, 4, 5);
+  fill("#fcfcfc", x + 27, y + 11, 4, 5);
+  fill("#fcfcfc", x + 24, y + 19, 4, 5);
+  /* 肚子 */
+  fill(belly, x + 4, y + 14, 12, 11);
+  fill("#c84800", x + 5, y + 16, 9, 1); fill("#c84800", x + 5, y + 19, 9, 1);
+  /* 头 */
+  fill("#006000", x + 0, y + 1, 17, 13);
+  fill(body, x + 1, y + 2, 15, 11);
+  /* 角 */
+  fill("#fcfcfc", x + 1, y - 1, 4, 4);
+  fill("#fcfcfc", x + 11, y - 1, 4, 4);
+  /* 眼睛 */
+  fill("#fcfcfc", x + 4, y + 4, 4, 4); fill("#000000", x + 5, y + 5, 2, 2);
+  fill("#fcfcfc", x + 10, y + 4, 4, 4); fill("#000000", x + 11, y + 5, 2, 2);
+  /* 嘴 */
+  fill("#000000", x, y + 9, 12, 4);
+  fill("#fcfcfc", x + 1, y + 9, 2, 2); fill("#fcfcfc", x + 5, y + 9, 2, 2); fill("#fcfcfc", x + 9, y + 9, 2, 2);
+  /* 腿 */
+  fill(belly, x + 5, y + 24, 7, 6);
+  fill(belly, x + 18, y + 24, 7, 6);
+  fill("#fcfcfc", x + 4, y + 28, 4, 2); fill("#fcfcfc", x + 9, y + 28, 4, 2);
+  fill("#fcfcfc", x + 17, y + 28, 4, 2); fill("#fcfcfc", x + 22, y + 28, 4, 2);
+  /* 手臂 */
+  fill(belly, x + 1, y + 14, 5, 8);
+}
+
+/* ---------- 道具 / 火球 / 粒子 ---------- */
+function drawItems() {
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var sx = Math.round(it.x - game.camX), sy = Math.round(it.y);
+    if (it.type === "blockcoin") {
+      drawSpr(SPR.coin[Math.floor(it.t / 4) % 4], sx, sy, false);
+    } else if (it.type === "mush" || it.type === "1up") {
+      drawSpr(it.type === "1up" ? SPR.mushroom1up : SPR.mushroom, sx - 1, sy - 2, false);
+    } else if (it.type === "flower") {
+      drawSpr(SPR.flower, sx - 1, sy - 2, false);
+    } else if (it.type === "star") {
+      drawSpr(SPR.star, sx - 1, sy - 2, false);
+    }
+  }
+  for (i = 0; i < fireballs.length; i++) {
+    var f = fireballs[i];
+    var fsx = Math.round(f.x - game.camX);
+    var fr = SPR.fireball[Math.floor(f.spin) % 3];
+    ctx.save();
+    ctx.translate(fsx + 4, Math.round(f.y) + 4);
+    ctx.rotate(f.spin * 0.35);
+    ctx.drawImage(fr, -4, -4);
+    ctx.restore();
+  }
+  if (axe && !game.axeUsed) {
+    var ax = Math.round(axe.x - game.camX), ay = Math.round(axe.y);
+    fill("#6c3400", ax + 5, ay + 4, 2, 12);
+    fill("#c0c0c0", ax + 1, ay + 1, 10, 6);
+    fill("#fcfcfc", ax + 2, ay + 2, 6, 2);
+    fill("#606060", ax + 1, ay + 6, 10, 1);
+  }
+  for (i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    var px = Math.round(p.x - game.camX);
+    ctx.save();
+    ctx.translate(px, Math.round(p.y));
+    ctx.rotate(p.t * 0.28 * p.spin);
+    drawSpr(SPR.deb[0], -4, -4, false);
+    ctx.restore();
+  }
+}
+var MUSHROOM_1UP = 1;
+/* ---------- 火棒 / 旗子 ---------- */
+function drawFirebars() {
+  for (var i = 0; i < firebars.length; i++) {
+    var f = firebars[i];
+    for (var j = 0; j < f.len; j++) {
+      var ang = f.ang + (j * 2 * Math.PI / f.len);
+      var bx = f.cx + Math.cos(ang) * (j + 1) * 8 - game.camX;
+      var by = f.cy + Math.sin(ang) * (j + 1) * 8;
+      var c = (j + Math.floor(game.tick / 3)) % 2 ? "#f8b800" : "#f83800";
+      fill("#fce8a0", bx - 3, by - 3, 6, 6);
+      fill(c, bx - 2, by - 2, 4, 4);
+    }
+  }
+}
+function drawFlag(lvl) {
+  if (lvl.def.flag === undefined) return;
+  var px = lvl.def.flag * TS + 7 - Math.round(game.camX);
+  var top = 2 * TS + 8 + (game.flagActive ? Math.min(game.flagY, 9 * TS - 20) : 0);
+  var c = "#00a800", d = "#006000";
+  for (var i = 0; i < 14; i++) {
+    var w = Math.round(14 * (14 - i) / 14);
+    fill(d, px - w - 1, top + i, w, 1);
+  }
+  for (i = 0; i < 12; i++) {
+    var w2 = Math.round(12 * (12 - i) / 12);
+    if (w2 > 0) fill(c, px - w2 - 1, top + i + 1, w2, 1);
+  }
+  fill("#fcfcfc", px - 8, top + 5, 3, 3);
+}
+function drawPiranhaWarn() {}
+
+/* ---------- 顶部分数飘字 ---------- */
+function drawPops() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = "bold " + Math.round(S * 7) + "px 'Courier New',monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  for (var i = 0; i < pops.length; i++) {
+    var p = pops[i];
+    var sx = (p.x - game.camX) * S, sy = p.y * S;
+    ctx.fillStyle = "#000000";
+    ctx.fillText(p.text, sx + S, sy + S);
+    ctx.fillStyle = "#fcfcfc";
+    ctx.fillText(p.text, sx, sy);
+  }
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+}
+
+/* ---------- 主渲染 ---------- */
+function render() {
+  var lvl = game.level;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+  if (!lvl) return;
+  var th = THEMES[lvl.theme] || THEMES.over;
+
+  if (game.state === "ready") { drawReadyScreen(th); return; }
+  if (game.state === "title" || game.state === "gameover" || game.state === "win") {
+    drawBGScreen(); return;
+  }
+  drawBG(lvl, th);
+  drawLevel(lvl, th);
+  if (lvl.def.castle !== undefined) drawCastle(lvl.def.castle * TS, th);
+  drawFlag(lvl);
+  drawItems();
+  drawEnemies();
+  drawFirebars();
+  if (player) drawPlayer();
+  drawPops();
+}
+
+function drawReadyScreen(th) {
+  fill("#000000", 0, 0, VW, VH);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#fcfcfc";
+  ctx.font = "bold " + Math.round(S * 11) + "px 'Courier New',monospace";
+  ctx.fillText("WORLD " + LEVELS[game.levelIndex].name, cv.width / 2, cv.height * 0.34);
+  ctx.font = "bold " + Math.round(S * 13) + "px 'Courier New',monospace";
+  ctx.fillText("x  " + game.lives, cv.width / 2, cv.height * 0.62);
+  var m = SMALL.stand.r;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(m, cv.width / 2 - S * 15, cv.height * 0.62 - (16 * S) / 2 + S, 16 * S, 16 * S);
+  ctx.font = "bold " + Math.round(S * 7) + "px 'Courier New',monospace";
+  ctx.fillStyle = "#a0a0a0";
+  ctx.fillText("READY", cv.width / 2, cv.height * 0.48);
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+}
+function drawBGScreen() {
+  fill("#000000", 0, 0, VW, VH);
+}
+
+/* ============================================================
+   DOM 界面
+   ============================================================ */
+var elHud = document.getElementById("hud");
+var elScore = document.getElementById("hScore");
+var elCoin = document.getElementById("hCoin");
+var elWorld = document.getElementById("hWorld");
+var elTime = document.getElementById("hTime");
+var elScreen = document.getElementById("screen");
+var elSub = document.getElementById("scSub");
+var elBody = document.getElementById("scBody");
+var elHint = document.getElementById("scHint");
+var elStage = document.getElementById("stage");
+var elTouch = document.getElementById("touch");
+
+function updateHud() {
+  elScore.textContent = pad(game.score, 6);
+  elCoin.textContent = "x" + pad(game.coins, 2);
+  elWorld.textContent = LEVELS[game.levelIndex] ? LEVELS[game.levelIndex].name : "1-1";
+  elTime.textContent = pad(Math.max(0, game.time), 3);
+}
+function showScreen(title, sub, lines, hint) {
+  elScreen.querySelector("h1").innerHTML = title;
+  elSub.textContent = sub || "";
+  elBody.innerHTML = "<p>" + lines.join("</p><p>") + "</p>";
+  elHint.innerHTML = hint || "";
+  elScreen.classList.add("on");
+}
+function hideScreen() { elScreen.classList.remove("on"); }
+
+function layout() {
+  var mar = 16;
+  var availW = window.innerWidth - mar * 2, availH = window.innerHeight - mar * 2;
+  var sc = Math.min(availW / VW, availH / VH);
+  sc = Math.max(1, sc);
+  var w = Math.floor(VW * sc), h = Math.floor(VH * sc);
+  elStage.style.width = w + "px";
+  elStage.style.height = h + "px";
+  cv.style.width = w + "px";
+  cv.style.height = h + "px";
+  elHud.style.fontSize = Math.max(9, w * 0.030) + "px";
+  elScreen.style.fontSize = Math.max(10, w * 0.030) + "px";
+  elTouch.style.fontSize = Math.max(10, w * 0.030) + "px";
+}
+window.addEventListener("resize", layout);
+layout();
+if ("ontouchstart" in window && window.innerWidth < 1100) elTouch.classList.add("on");
+
+/* ============================================================
+   音效（WebAudio 程序化合成）
+   ============================================================ */
+var AC = null, muted = false;
+function audio() {
+  if (!AC) {
+    try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = null; }
+  }
+  if (AC && AC.state === "suspended") AC.resume();
+  return AC;
+}
+function tone(freq, dur, type, vol, delay, slideTo) {
+  var ac = audio(); if (!ac || muted) return;
+  var t0 = ac.currentTime + (delay || 0);
+  var o = ac.createOscillator(), g = ac.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t0 + dur);
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol === undefined ? 0.15 : vol, t0 + 0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function noise(dur, vol, delay, filtFrom, filtTo) {
+  var ac = audio(); if (!ac || muted) return;
+  var t0 = ac.currentTime + (delay || 0);
+  var len = Math.max(1, Math.floor(ac.sampleRate * dur));
+  var buf = ac.createBuffer(1, len, ac.sampleRate);
+  var d = buf.getChannelData(0);
+  for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  var src = ac.createBufferSource(); src.buffer = buf;
+  var f = ac.createBiquadFilter(); f.type = "lowpass";
+  f.frequency.setValueAtTime(filtFrom || 2200, t0);
+  if (filtTo) f.frequency.exponentialRampToValueAtTime(filtTo, t0 + dur);
+  var g = ac.createGain();
+  g.gain.setValueAtTime(vol === undefined ? 0.16 : vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  src.connect(f); f.connect(g); g.connect(ac.destination);
+  src.start(t0); src.stop(t0 + dur);
+}
+var sfx = {
+  jump:      function () { tone(360, 0.16, "square", 0.13, 0, 780); },
+  bigJump:   function () { tone(300, 0.22, "square", 0.14, 0, 900); },
+  coin:      function () { tone(988, 0.07, "square", 0.12); tone(1319, 0.22, "square", 0.12, 0.07); },
+  bump:      function () { tone(180, 0.08, "square", 0.12, 0, 90); noise(0.06, 0.08); },
+  breakBlock:function () { noise(0.22, 0.22, 0, 5000, 400); tone(220, 0.1, "square", 0.08, 0, 90); },
+  stomp:     function () { noise(0.1, 0.2, 0, 3000, 300); tone(260, 0.1, "square", 0.12, 0, 120); },
+  kick:      function () { tone(500, 0.1, "square", 0.13, 0, 200); noise(0.08, 0.1); },
+  fire:      function () { tone(700, 0.1, "sawtooth", 0.09, 0, 200); },
+  pipe:      function () { tone(300, 0.2, "square", 0.12, 0, 120); },
+  sprout:    function () { tone(400, 0.06, "square", 0.1); tone(600, 0.06, "square", 0.1, 0.06); tone(800, 0.1, "square", 0.1, 0.12); },
+  powerup:   function () {
+    var n = [523, 659, 784, 1047, 1319, 1568], i;
+    for (i = 0; i < n.length; i++) tone(n[i], 0.09, "square", 0.12, i * 0.055);
+  },
+  oneUp:     function () {
+    var n = [784, 1047, 1319, 1568], i;
+    for (i = 0; i < n.length; i++) tone(n[i], 0.12, "square", 0.12, i * 0.1);
+  },
+  die:       function () {
+    stopMusic();
+    var n = [523, 392, 330, 262, 196, 165, 131], i;
+    for (i = 0; i < n.length; i++) tone(n[i], 0.16, "square", 0.14, 0.06 + i * 0.1);
+  },
+  flagpole:  function () {
+    var i;
+    for (i = 0; i < 12; i++) tone(400 + i * 90, 0.06, "square", 0.09, i * 0.045);
+  },
+  bridgeCollapse: function () { noise(0.6, 0.25, 0, 1200, 120); tone(120, 0.5, "square", 0.1, 0, 60); },
+  bowserFire:function () { tone(220, 0.18, "sawtooth", 0.1, 0, 90); noise(0.14, 0.08); },
+  pause:     function () { tone(660, 0.08, "square", 0.1); }
+};
+
+/* ---------------- 芯片音乐 ---------------- */
+var musicTimer = null, musicStep = 0, musicTrack = null;
+/* 旋律为原创简单芯片音（非任天堂原曲） */
+var TRACKS = {
+  level: {
+    bpm: 200,
+    lead: [76,76,0,76,0,72,76,0,79,0,0,0,67,0,0,0],
+    bass: [48,0,55,0,48,0,55,0,48,0,55,0,48,0,55,0]
+  },
+  over: {
+    bpm: 190,
+    lead: [72,0,76,0,79,0,76,0,72,0,74,0,76,0,0,0],
+    bass: [48,0,48,0,55,0,55,0,53,0,53,0,48,0,48,0]
+  },
+  under: {
+    bpm: 210,
+    lead: [64,0,67,0,64,0,62,0,60,0,62,0,64,0,0,0],
+    bass: [36,0,36,0,43,0,43,0,41,0,41,0,36,0,36,0]
+  },
+  castle: {
+    bpm: 230,
+    lead: [58,0,58,0,61,0,58,0,56,0,58,0,54,0,0,0],
+    bass: [34,0,34,0,34,0,34,0,32,0,32,0,30,0,30,0]
+  },
+  star: {
+    bpm: 320,
+    lead: [84,88,91,96,84,88,91,96,86,89,93,98,86,89,93,98],
+    bass: [48,48,48,48,50,50,50,50,52,52,52,52,53,53,53,53]
+  },
+  clear: {
+    bpm: 150,
+    lead: [72,76,79,84,79,76,72,0,74,77,81,86,81,77,74,0],
+    bass: [48,48,48,48,43,43,43,43,50,50,50,50,45,45,45,45]
+  },
+  win: {
+    bpm: 140,
+    lead: [72,72,72,0,72,76,74,0,72,79,76,0,72,0,0,0],
+    bass: [48,48,48,0,48,52,50,0,48,55,52,0,48,0,0,0]
+  }
+};
+function midiFreq(n) { return 440 * Math.pow(2, (n - 69) / 12); }
+function startMusic(name) {
+  stopMusic();
+  var track = TRACKS[name];
+  if (!track) return;
+  musicTrack = name; musicStep = 0;
+  var stepMs = 60000 / track.bpm / 4;
+  musicTimer = setInterval(function () {
+    if (muted || game.state === "paused") return;
+    var ac = audio(); if (!ac) return;
+    var i = musicStep % track.lead.length;
+    var ln = track.lead[i], bn = track.bass[i];
+    if (ln) tone(midiFreq(ln), stepMs / 1000 * 1.6, "square", 0.055);
+    if (bn) tone(midiFreq(bn), stepMs / 1000 * 1.7, "triangle", 0.075);
+    musicStep++;
+  }, stepMs);
+}
+function stopMusic() { if (musicTimer) { clearInterval(musicTimer); musicTimer = null; } musicTrack = null; }
+function toggleMute() {
+  muted = !muted;
+  document.getElementById("mute").textContent = muted ? "🔇 M" : "";
+  if (muted) stopMusic();
+  else if (game.state === "play" || game.state === "ready") startMusic(musicNameForLevel());
+}
+function musicNameForLevel() {
+  var t = LEVELS[game.levelIndex].theme;
+  if (t === "under") return "under";
+  if (t === "castle") return "castle";
+  return "over";
+}
+function togglePause() {
+  if (game.state === "play") { game.state = "paused"; showScreen("PAUSE", "", ["游戏已暂停"], "按 P 继续"); sfx.pause(); }
+  else if (game.state === "paused") { game.state = "play"; hideScreen(); }
+}
+window.addEventListener("pointerdown", function () { audio(); }, { once: true });
+
+/* ---------------- 开始游戏 ---------------- */
+function doStart() {
+  audio();
+  hideScreen();
+  game.score = 0; game.coins = 0; game.lives = 3; game.keepPower = "small";
+  loadLevel(0);
+}
+function initTitle() {
+  showScreen("SUPER MARIO", "HTML5 EDITION", [
+    "<span class='k'>← →</span> / <span class='k'>A D</span> 移动　<span class='k'>空格</span> / <span class='k'>Z</span> 跳跃",
+    "<span class='k'>Shift</span> / <span class='k'>X</span> 助跑·发射火球　<span class='k'>↓</span> 蹲下",
+    "<span class='k'>Enter</span> 开始　<span class='k'>P</span> 暂停　<span class='k'>M</span> 静音",
+    "踩扁敌人 · 顶问号砖 · 吃蘑菇变大 · 吃火花能喷火",
+    "共 4 关：1-1 地面、1-2 地下、1-3 天空、1-4 城堡（库巴）"
+  ], "按 回车 / 空格 开始");
+}
+
+/* ============================================================
+   主循环
+   ============================================================ */
+function update() {
+  game.tick++;
+  var lvl = game.level;
+  if (game.state === "title") { if (KEY.startEdge) doStart(); KEY.startEdge = 0; return; }
+  if (game.state === "paused") { KEY.jumpEdge = KEY.runEdge = KEY.startEdge = 0; return; }
+  if (game.state === "gameover" || game.state === "win") {
+    if (KEY.startEdge) { KEY.startEdge = 0; doStart(); }
+    KEY.startEdge = 0;
+    return;
+  }
+  if (game.state === "ready") {
+    game.timer--;
+    updateParticles();
+    if (game.timer <= 0) { game.state = "play"; startMusic(musicNameForLevel()); }
+    KEY.jumpEdge = KEY.runEdge = KEY.startEdge = 0;
+    return;
+  }
+  if (game.state === "complete") {
+    game.timer--;
+    updateParticles();
+    if (game.timer <= 0) { stopMusic(); nextLevel(); }
+    KEY.jumpEdge = KEY.runEdge = KEY.startEdge = 0;
+    return;
+  }
+
+  /* 计时 */
+  if (game.state === "play") {
+    game.timeAcc++;
+    if (game.timeAcc >= 25) {
+      game.timeAcc = 0; game.time--;
+      updateHud();
+      if (game.time <= 100 && !game.hurry) { game.hurry = true; }
+      if (game.time <= 0) { game.time = 0; playerDie(); }
+    }
+  }
+  if (game.state === "dying") { updatePlayer(lvl); updateParticles(); KEY.jumpEdge = KEY.runEdge = KEY.startEdge = 0; return; }
+
+  updatePlayer(lvl);
+  if (game.state === "play") playerEnemyCollisions();
+  updateEnemies(lvl);
+  updateItems(lvl);
+  updateFireballs(lvl);
+  updateParticles();
+  updateBridge(lvl);
+  for (var fb = 0; fb < firebars.length; fb++) firebars[fb].ang += 0.028;
+  /* 火棒伤害 */
+  if (game.state === "play" && !player.dead && player.star === 0) {
+    for (fb = 0; fb < firebars.length; fb++) {
+      var fbb = firebars[fb];
+      for (var j = 0; j < fbb.len; j++) {
+        var ang = fbb.ang + (j * 2 * Math.PI / fbb.len);
+        var bx = fbb.cx + Math.cos(ang) * (j + 1) * 8;
+        var by = fbb.cy + Math.sin(ang) * (j + 1) * 8;
+        if (player.x + player.w > bx - 4 && player.x < bx + 4 && player.y + player.h > by - 4 && player.y < by + 4) { hurtPlayer(); }
+      }
+    }
+  }
+  if (game.state === "flag") updateFlag();
+
+  /* 相机（只向右滚动） */
+  if (player && !player.dead) {
+    var target = player.x + player.w / 2 - 96;
+    target = clamp(target, 0, Math.max(0, game.lvlW - VW));
+    if (target > game.camX) game.camX = target;
+  }
+
+  KEY.jumpEdge = 0; KEY.runEdge = 0; KEY.startEdge = 0;
+}
+
+var _last = 0, _acc = 0, STEP = 1000 / 60;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!_last) _last = ts;
+  var dt = Math.min(ts - _last, 120);
+  _last = ts;
+  _acc += dt;
+  var guard = 0;
+  while (_acc >= STEP && guard < 5) { update(); _acc -= STEP; guard++; }
+  if (guard >= 5) _acc = 0;
+  render();
+}
+
+/* 初始化 */
+loadLevel(0);
+game.state = "title";
+initTitle();
+updateHud();
+requestAnimationFrame(frame);
